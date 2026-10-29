@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -43,6 +44,21 @@ BIN = os.environ.get("UPSCALER_BIN", "/app/bin/realesrgan-ncnn-vulkan")
 MODELS = os.environ.get("UPSCALER_MODELS", "/app/models")
 PORT = int(os.environ.get("PORT", "8000"))
 CHUNK = int(os.environ.get("CHUNK_FRAMES", "40"))
+
+# The PyTorch path, for when there is a card and torch to drive it.
+#
+# The ncnn binary needs Vulkan, and the rental boxes hand out a CUDA stack
+# whose Vulkan ICD refuses to give a device to anyone ("invalid gpu
+# device"). CUDA they do hand out, so on a rented box the AI pass runs
+# through PyTorch instead - the same weights, the same job. On the laptop
+# there is no torch and no card, so the ncnn binary does the work there.
+try:
+    sys.path.insert(0, HERE)
+    import realesrgan_cuda
+    CUDA = realesrgan_cuda.cuda_available()
+except Exception:
+    realesrgan_cuda = None
+    CUDA = False
 
 # A model id -> the file name the binary wants.
 MODELS_DIR = MODELS
@@ -376,7 +392,10 @@ class Handler(BaseHTTPRequestHandler):
                                 if f.endswith(".param"))
             self._json({"ok": True, "gpu": gpu_name(),
                         "models": models, "binary": os.path.exists(BIN),
-                        "engines": ["realesrgan", "seedvr2", "star", "dloral"]})
+                        "engines": ["realesrgan", "seedvr2", "star", "dloral"],
+                        "backend": "cuda" if CUDA else "ncnn",
+                        "cuda_models": (realesrgan_cuda.list_models()
+                                        if realesrgan_cuda else [])})
             return
         self._json({"error": "not found"}, 404)
 
@@ -419,7 +438,20 @@ class Handler(BaseHTTPRequestHandler):
                 shutil.copy(src, clip)
                 dloral_upscale(clip, out, scale=scale or 4, log=lambda m: print(m, flush=True))
             else:
-                upscale(src, out, scale=scale, model=model, denoise=denoise)
+                # Real-ESRGAN. On a rented box that means PyTorch on the
+                # card; on the laptop it means the ncnn binary.
+                cuda_model = bool(CUDA and realesrgan_cuda
+                                  and realesrgan_cuda.has_model(model))
+                if engine == "realesrgan-cuda" and not cuda_model:
+                    raise RuntimeError(
+                        "this box has no CUDA weights for that model "
+                        f"(have: {realesrgan_cuda.list_models() if realesrgan_cuda else []})")
+                if cuda_model:
+                    realesrgan_cuda.upscale(src, out, model=model, scale=scale,
+                                           denoise=denoise,
+                                           log=lambda m: print(m, flush=True))
+                else:
+                    upscale(src, out, scale=scale, model=model, denoise=denoise)
             size = os.path.getsize(out)
             print(f"job done: {size/1e6:.1f} MB in {time.time()-t0:.0f}s", flush=True)
             with open(out, "rb") as fh:
