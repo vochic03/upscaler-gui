@@ -60,10 +60,6 @@ RUN if [ "$BUILD_RIFE" = "1" ]; then \
 ENV RIFE_DIR=/app
 ENV RIFE_BIN=/app/bin/rife-ncnn-vulkan
 
-COPY server.py /app/server.py
-COPY arch_models.py /app/arch_models.py
-COPY realesrgan_cuda.py /app/realesrgan_cuda.py
-
 # ---------------------------------------------------------------------------
 # The CUDA path.
 #
@@ -73,6 +69,24 @@ COPY realesrgan_cuda.py /app/realesrgan_cuda.py
 # on a rented box the AI pass runs through PyTorch instead, with the same
 # weights (realesrgan_cuda.py). The ncnn binary stays for the laptop.
 #
+# The cu121 wheels run on any driver from 525 up, which covers every box
+# Runpod hands out - the newer ones included, because CUDA is backwards
+# compatible.
+#
+# This layer is deliberately before the code copies: it is the slow, big
+# one, and the worker code changes far more often than it does.
+ARG BUILD_TORCH=1
+RUN if [ "$BUILD_TORCH" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends python3-pip && \
+        rm -rf /var/lib/apt/lists/* && \
+        pip3 install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 \
+            torch==2.5.1 && \
+        pip3 install --no-cache-dir "numpy<2" && \
+        echo "torch installed." ; \
+    else \
+        echo "built without torch (use --build-arg BUILD_TORCH=0 to skip it)" ; \
+    fi
+
 # The weights come from the upstream releases, the same ones the models
 # above came from, so nothing new is trusted.
 RUN curl -fsSL -o /app/models/realesr-general-x4v3.pth \
@@ -87,22 +101,11 @@ RUN curl -fsSL -o /app/models/realesr-general-x4v3.pth \
         https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth && \
     echo "the PyTorch weights are in."
 
-# The cu121 wheels run on any driver from 525 up, which covers every box
-# Runpod hands out - the newer ones included, because CUDA is backwards
-# compatible.
-ARG BUILD_TORCH=1
-RUN if [ "$BUILD_TORCH" = "1" ]; then \
-        apt-get update && apt-get install -y --no-install-recommends python3-pip && \
-        rm -rf /var/lib/apt/lists/* && \
-        pip3 install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 \
-            torch==2.5.1 && \
-        pip3 install --no-cache-dir "numpy<2" && \
-        echo "torch installed." ; \
-    else \
-        echo "built without torch (use --build-arg BUILD_TORCH=0 to skip it)" ; \
-    fi
-
 ENV REALESRGAN_MODELS=/app/models
+
+COPY server.py /app/server.py
+COPY arch_models.py /app/arch_models.py
+COPY realesrgan_cuda.py /app/realesrgan_cuda.py
 
 # Where the frames go while a job runs. A rented card comes with plenty of
 # disk; a long clip needs room for the frames as PNGs.
