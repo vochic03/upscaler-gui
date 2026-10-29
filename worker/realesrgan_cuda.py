@@ -26,8 +26,9 @@ MODELS_DIR = os.environ.get("REALESRGAN_MODELS", "/app/models")
 # "x4plus-v3"; the classic RRDB nets are the heavier original weights.
 # name -> file, arch, scale, extra
 REGISTRY = {
-    "realesr-general-x4v3": ("realesr-general-x4v3.pth", "srvgg", 4, {}),
-    "realesr-general-wdn-x4v3": ("realesr-general-wdn-x4v3.pth", "srvgg", 4, {}),
+    "realesr-general-x4v3": ("realesr-general-x4v3.pth", "srvgg", 4, {"num_conv": 32}),
+    "realesr-general-wdn-x4v3": ("realesr-general-wdn-x4v3.pth", "srvgg", 4,
+                                 {"num_conv": 32}),
     "RealESRGAN_x4plus": ("RealESRGAN_x4plus.pth", "rrdb", 4, {"num_block": 23}),
     "RealESRGAN_x4plus_anime_6B": ("RealESRGAN_x4plus_anime_6B.pth", "rrdb", 4,
                                    {"num_block": 6}),
@@ -82,8 +83,8 @@ def resolve(model):
 
 def build_net(spec, device):
     if spec["arch"] == "srvgg":
-        net = SRVGGNetCompact(num_feat=64, num_conv=16, upscale=spec["scale"],
-                               act_type="prelu")
+        net = SRVGGNetCompact(num_feat=64, num_conv=spec["extra"].get("num_conv", 32),
+                               upscale=spec["scale"], act_type="prelu")
     else:
         net = RRDBNet(num_in_ch=3, num_out_ch=3, scale=spec["scale"], num_feat=64,
                       num_grow_ch=32, **spec["extra"])
