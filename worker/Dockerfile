@@ -20,9 +20,14 @@ ENV PORT=8000
 
 # ffmpeg for the frame extraction and the encode, python3 for the worker,
 # and the Vulkan loader for the NCNN binary.
+# No Mesa in here on purpose. Mesa's lavapipe is a software Vulkan renderer,
+# and if it is present the NCNN binary picks it instead of the NVIDIA card
+# the rental provider gave us - the upscale then runs on the CPU, a hundred
+# times slower, and every request runs past the proxy's time limit.
+# The NVIDIA Vulkan ICD is injected by the container runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends curl unzip \
         ffmpeg python3 ca-certificates \
-        libvulkan1 mesa-vulkan-drivers vulkan-tools \
+        libvulkan1 vulkan-tools \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -56,6 +61,48 @@ ENV RIFE_DIR=/app
 ENV RIFE_BIN=/app/bin/rife-ncnn-vulkan
 
 COPY server.py /app/server.py
+COPY arch_models.py /app/arch_models.py
+COPY realesrgan_cuda.py /app/realesrgan_cuda.py
+
+# ---------------------------------------------------------------------------
+# The CUDA path.
+#
+# The rental boxes hand out a working CUDA stack, but their Vulkan ICD
+# refuses to give a device to the ncnn build - vkCreateInstance comes back
+# empty and the model says "invalid gpu device". CUDA they do hand out, so
+# on a rented box the AI pass runs through PyTorch instead, with the same
+# weights (realesrgan_cuda.py). The ncnn binary stays for the laptop.
+#
+# The weights come from the upstream releases, the same ones the models
+# above came from, so nothing new is trusted.
+RUN curl -fsSL -o /app/models/realesr-general-x4v3.pth \
+        https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth && \
+    curl -fsSL -o /app/models/realesr-general-wdn-x4v3.pth \
+        https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-wdn-x4v3.pth && \
+    curl -fsSL -o /app/models/RealESRGAN_x4plus.pth \
+        https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth && \
+    curl -fsSL -o /app/models/RealESRGAN_x4plus_anime_6B.pth \
+        https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth && \
+    curl -fsSL -o /app/models/RealESRGAN_x2plus.pth \
+        https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth && \
+    echo "the PyTorch weights are in."
+
+# The cu121 wheels run on any driver from 525 up, which covers every box
+# Runpod hands out - the newer ones included, because CUDA is backwards
+# compatible.
+ARG BUILD_TORCH=1
+RUN if [ "$BUILD_TORCH" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends python3-pip && \
+        rm -rf /var/lib/apt/lists/* && \
+        pip3 install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 \
+            torch==2.5.1 && \
+        pip3 install --no-cache-dir "numpy<2" && \
+        echo "torch installed." ; \
+    else \
+        echo "built without torch (use --build-arg BUILD_TORCH=0 to skip it)" ; \
+    fi
+
+ENV REALESRGAN_MODELS=/app/models
 
 # Where the frames go while a job runs. A rented card comes with plenty of
 # disk; a long clip needs room for the frames as PNGs.
