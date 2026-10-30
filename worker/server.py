@@ -370,6 +370,45 @@ def dloral_upscale(video_path, out_path, scale=4, log=print):
     return out_path
 
 
+def process(src, out, scale=4, model=None, denoise=None, engine="realesrgan",
+            prompt="", resolution=1080):
+    """Do the job, whichever engine it is.
+
+    One place, so the pod mode and the serverless mode cannot drift apart.
+    """
+    if engine == "star":
+        star_upscale(src, out, prompt=prompt, scale=scale or 4,
+                     steps=int(os.environ.get("STAR_STEPS", "15")),
+                     chunk=int(os.environ.get("STAR_CHUNK", "32")),
+                     log=lambda m: print(m, flush=True))
+    elif engine == "seedvr2":
+        seedvr2_upscale(src, out, resolution=resolution,
+                        log=lambda m: print(m, flush=True))
+    elif engine == "dloral":
+        # DLoRAL wants a directory of videos.
+        vids = os.path.join(os.path.dirname(out), "videos")
+        os.makedirs(vids, exist_ok=True)
+        clip = os.path.join(vids, "clip.mp4")
+        shutil.copy(src, clip)
+        dloral_upscale(clip, out, scale=scale or 4, log=lambda m: print(m, flush=True))
+    else:
+        # Real-ESRGAN. On a rented box that means PyTorch on the card; on
+        # the laptop it means the ncnn binary.
+        cuda_model = bool(CUDA and realesrgan_cuda
+                          and realesrgan_cuda.has_model(model))
+        if engine == "realesrgan-cuda" and not cuda_model:
+            raise RuntimeError(
+                "this box has no CUDA weights for that model "
+                f"(have: {realesrgan_cuda.list_models() if realesrgan_cuda else []})")
+        if cuda_model:
+            realesrgan_cuda.upscale(src, out, model=model, scale=scale,
+                                   denoise=denoise,
+                                   log=lambda m: print(m, flush=True))
+        else:
+            upscale(src, out, scale=scale, model=model, denoise=denoise)
+    return out
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -385,6 +424,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        # Runpod's load-balancing endpoint asks the worker "GET /ping" until
+        # it answers 200. Until it does, the worker never gets traffic.
+        if self.path.rstrip("/") in ("/ping", "/ping/"):
+            self._json({"status": "ok"})
+            return
         if self.path.rstrip("/") in ("/health", ""):
             models = []
             if os.path.isdir(MODELS_DIR):
@@ -422,36 +466,8 @@ class Handler(BaseHTTPRequestHandler):
                 fh.write(data)
             out = os.path.join(work, "out.mp4")
             t0 = time.time()
-            if engine == "star":
-                star_upscale(src, out, prompt=prompt, scale=scale or 4,
-                             steps=int(os.environ.get("STAR_STEPS", "15")),
-                             chunk=int(os.environ.get("STAR_CHUNK", "32")),
-                             log=lambda m: print(m, flush=True))
-            elif engine == "seedvr2":
-                seedvr2_upscale(src, out, resolution=resolution,
-                                log=lambda m: print(m, flush=True))
-            elif engine == "dloral":
-                # DLoRAL wants a directory of videos.
-                vids = os.path.join(work, "videos")
-                os.makedirs(vids)
-                clip = os.path.join(vids, "clip.mp4")
-                shutil.copy(src, clip)
-                dloral_upscale(clip, out, scale=scale or 4, log=lambda m: print(m, flush=True))
-            else:
-                # Real-ESRGAN. On a rented box that means PyTorch on the
-                # card; on the laptop it means the ncnn binary.
-                cuda_model = bool(CUDA and realesrgan_cuda
-                                  and realesrgan_cuda.has_model(model))
-                if engine == "realesrgan-cuda" and not cuda_model:
-                    raise RuntimeError(
-                        "this box has no CUDA weights for that model "
-                        f"(have: {realesrgan_cuda.list_models() if realesrgan_cuda else []})")
-                if cuda_model:
-                    realesrgan_cuda.upscale(src, out, model=model, scale=scale,
-                                           denoise=denoise,
-                                           log=lambda m: print(m, flush=True))
-                else:
-                    upscale(src, out, scale=scale, model=model, denoise=denoise)
+            process(src, out, scale=scale, model=model, denoise=denoise,
+                    engine=engine, prompt=prompt, resolution=resolution)
             size = os.path.getsize(out)
             print(f"job done: {size/1e6:.1f} MB in {time.time()-t0:.0f}s", flush=True)
             with open(out, "rb") as fh:
