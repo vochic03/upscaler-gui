@@ -259,6 +259,34 @@ empty (`POST /batch` with `[]`), filled
 (`POST /batch/<id>/requests`), then set loose (`POST /batch/<id>/finalize`);
 a batch that is not finalized is never run.
 
+### The two endpoints that are set up
+
+Both are built from `docker.io/bzz1/upscaler:v2`, and both are **parked at
+zero workers**, because a warm worker is a rental that bills - about
+$0.89 an hour each on a 4090, and Runpod kept three of them warm on the
+queue endpoint long after the work was done.
+
+| | id | what it is |
+| --- | --- | --- |
+| `upscaler` | `a76yvmlq4f5q6j` | QUEUE, the runpod SDK, jobs are pulled. A long job is not a request, so there is no 100-second cap. |
+| `upscaler-lb` | `xa70ke24lbx886` | LOAD_BALANCER, plain HTTP to the worker, our own paths. |
+
+To use one, turn its workers back on - and turn them off again when the
+work is done:
+
+```bash
+# on
+curl -X PATCH https://api.runpod.ai/v2/a76yvmlq4f5q6j \
+  -H "Authorization: Bearer $RUNPOD_API_KEY" -H "Content-Type: application/json" \
+  -d '{"workers": {"min": 0, "max": 3, "idleTimeout": 5}}'
+# off
+... -d '{"workers": {"min": 0, "max": 0, "idleTimeout": 5}}'
+```
+
+The pod route needs none of this: a pod is created for one job and
+terminated in a `finally`, so it only ever bills for the minutes it is
+actually working.
+
 ## Container images
 
 `worker/Dockerfile` builds the fast image. Two things are still on the
