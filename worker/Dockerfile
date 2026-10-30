@@ -87,6 +87,13 @@ RUN if [ "$BUILD_TORCH" = "1" ]; then \
         echo "built without torch (use --build-arg BUILD_TORCH=0 to skip it)" ; \
     fi
 
+# boto3 is only for the serverless path, where a result that is too big to
+# come back in the answer is written to a bucket. The runpod SDK is what
+# pulls the jobs on a serverless endpoint: the job is not posted to the
+# container, it is fetched from RUNPOD_WEBHOOK_GET_JOB. Its own layer, so
+# the torch layer above stays cached.
+RUN pip3 install --no-cache-dir boto3 runpod && echo "boto3 and the runpod SDK installed."
+
 # The weights come from the upstream releases, the same ones the models
 # above came from, so nothing new is trusted.
 RUN curl -fsSL -o /app/models/realesr-general-x4v3.pth \
@@ -106,6 +113,7 @@ ENV REALESRGAN_MODELS=/app/models
 COPY server.py /app/server.py
 COPY arch_models.py /app/arch_models.py
 COPY realesrgan_cuda.py /app/realesrgan_cuda.py
+COPY serverless.py /app/serverless.py
 
 # Where the frames go while a job runs. A rented card comes with plenty of
 # disk; a long clip needs room for the frames as PNGs.
