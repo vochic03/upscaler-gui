@@ -12,6 +12,13 @@ gh release download review-media --repo vochic03/upscaler-gui
 The before/after **images** are in the repository itself, under
 `docs/review/images/` - those are the part a reviewer can actually read.
 
+
+
+The names below are the names on this computer. GitHub replaces the
+spaces and the brackets in an asset name with dots, so the release
+calls that one MNE.Play.capture.1080p.DVD.look.mp4, and the Emina
+ones the same way. The files themselves are unchanged.
+
 | file | size | what it is |
 |---|---:|---|
 | `Zvezde-Granda-upscaled.mp4` | 338.9 MB | the finished film - 211 s, 1440x1080, 25 fps, SeedVR2 + the Enhance finishing, the original audio muxed back |
