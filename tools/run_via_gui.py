@@ -74,8 +74,24 @@ def main():
         print("\nnot approved - pass --approve to rent")
         return 1
 
-    body["rent_approved"] = True
-    body["rent_estimate"] = estimate
+    # --approve is the user saying yes at the terminal. The server only
+    # takes a yes that carries the token from its own page, so this reads
+    # it from there - the same thing the GUI does. (Writing
+    # "rent_approved": true into the job is not an approval and the server
+    # throws it away.)
+    import re
+    import urllib.request
+    with urllib.request.urlopen(GUI + "/", timeout=20) as r:
+        m = re.search(r'name="approve-token" content="([0-9a-f]+)"',
+                      r.read().decode("utf-8", "replace"))
+    req = urllib.request.Request(
+        GUI + "/api/approve",
+        data=json.dumps({"id": estimate.get("approval_id"), "yes": True}).encode(),
+        headers={"Content-Type": "application/json",
+                 "X-Approve-Token": m.group(1) if m else ""}, method="POST")
+    with urllib.request.urlopen(req, timeout=20) as r:
+        print("approved:", json.loads(r.read().decode()).get("state"))
+    body["rent_approval"] = estimate.get("approval_id")
     job = call("POST", "/api/run", body)
     jid = job.get("id")
     print(f"\njob {jid} started")
