@@ -120,7 +120,13 @@ LOOKS = {
         "grain_mode": "perlin",
         "grain_tscale": 0.08,
         "halation": 0.05,
-        "contrast": 0.02,
+        # The grade is a curve on the luma alone (see grade_filters): a
+        # touch of gamma to give the midtones back, a toe that keeps the
+        # shadows off the floor, and the white pinned where it is. It used
+        # to be eq=contrast=1.02, which pivots on mid-grey: on this dark
+        # material (median 41 of 255) that took the median down six levels
+        # and closed the hair and the faces up into black.
+        "gamma": 1.04,
         "saturation": 0.04,
         "black_lift": 0.01,
     },
@@ -145,7 +151,7 @@ LOOKS = {
         "grain_mode": "perlin",
         "grain_tscale": 0.08,
         "halation": 0.07,
-        "contrast": 0.03,
+        "gamma": 1.04,
         "saturation": 0.05,
         "chroma_soft": True,     # coarser, softer chroma
         "black_lift": 0.012,     # the shadows never reach zero
@@ -160,7 +166,7 @@ LOOKS = {
         "grain_mode": "perlin",
         "grain_tscale": 0.08,
         "halation": 0.07,
-        "contrast": 0.02,
+        "gamma": 1.04,
         "saturation": 0.03,
         "chroma_soft": True,     # coarser, softer chroma
         "black_lift": 0.016,     # the shadows never reach zero
@@ -504,6 +510,46 @@ def video_info(path):
 
 def even(n):
     return max(2, int(n) // 2 * 2)
+
+
+def grade_filters(look):
+    """The grade of a look, as ffmpeg filters that stay in YUV.
+
+    The tone curve works on the luma alone, in limited range: with x the
+    luma between black (16) and white (235) as 0..1,
+
+        out = lift + (1 - lift) * x ** (1 / gamma)
+
+    so the white stays where it is, the black is raised to `lift` (the
+    shadows of an analogue transfer never reach zero), and a gamma above 1
+    opens the midtones and the shadows without moving either end.
+
+    What this replaces, and why, measured on 100 frames of the SeedVR2
+    output (Y code values; the source is untagged, i.e. limited range):
+
+      * eq=contrast=1.02 pivots on 128. The picture is dark - median 41 -
+        so everything that matters went DOWN: the median by 3 levels on
+        its own, and with the rest of the chain by 6 (41 -> 35).
+      * colorlevels=rimin=0.01 was meant as a black lift, but rimin is the
+        INPUT black point: it pulls the shadows down (p5 18 -> 16), not up.
+        It also only works in RGB, so ffmpeg converted every frame to RGB
+        and back, which clips the saturated stage lights (p95 158 -> 155).
+
+    Saturation is applied to the chroma planes only (eq with contrast 1
+    leaves the luma alone). A look can still name "contrast"; it is
+    honoured, but no built-in look uses it any more.
+    """
+    out = []
+    gamma = float(look.get("gamma") or 1.0)
+    lift = float(look.get("black_lift") or 0)
+    if gamma != 1.0 or lift:
+        out.append("lutyuv=y='16+219*(%s+(1-%s)*pow(clip((val-16)/219\\,0\\,1)\\,1/%s))'"
+                   % (repr(lift), repr(lift), repr(gamma)))
+    contrast = float(look.get("contrast") or 0)
+    saturation = float(look.get("saturation") or 0)
+    if contrast or saturation:
+        out.append(f"eq=contrast={1 + contrast}:saturation={1 + saturation}")
+    return out
 
 
 class Job:
@@ -1066,19 +1112,21 @@ class Job:
             blend = float(override)
         soften = float(look["soften"])
         grain = int(look["grain"])
-        contrast = float(look["contrast"])
-        saturation = float(look["saturation"])
+        contrast = float(look.get("contrast") or 0)
+        saturation = float(look.get("saturation") or 0)
         cas = float(look.get("cas") or 0)
         halation = float(look.get("halation") or 0)
         # A small tscale is the slow one: the pattern then holds for a
         # second or two and drifts, the way emulsion does.
-        perlin_grain = look.get("grain_mode") == "perlin" and grain > 0
+        perlin_grain = (look.get("grain_mode") == "perlin" and grain > 0
+                        and ffbin.has_filter("perlin"))
         grain_s = grain * 0.05
         halation_sigma = max(4, min(24, (target[1] if target else ai_h) // 90))
         treat = bool(blend or soften or grain or contrast or saturation
                      or cas or halation
                      or look.get("chroma_shift") or look.get("chroma_soft")
-                     or look.get("black_lift"))
+                     or look.get("black_lift")
+                     or float(look.get("gamma") or 1.0) != 1.0)
 
         if treat:
             # Two upscalers, blended: the AI result over a plain lanczos
@@ -1118,13 +1166,7 @@ class Job:
                 # shimmers badly - the opposite of the calm film look. Static
                 # grain gives the analogue texture without the flicker.
                 filters.append(f"noise=alls={grain}:allf=u")
-            if contrast or saturation:
-                filters.append(f"eq=contrast={1 + contrast}:saturation={1 + saturation}")
-            lift = float(look.get("black_lift") or 0)
-            if lift:
-                # Lift the black point a touch: the shadow detail of an
-                # analogue transfer never reaches zero.
-                filters.append(f"colorlevels=rimin={lift}:gimin={lift}:bimin={lift}")
+            filters.extend(grade_filters(look))
             filters.append("format=yuv420p")
             shift = int(look.get("chroma_shift") or 0)
             if shift:
@@ -1305,6 +1347,10 @@ class Job:
         grain = int(look.get("grain") or 0)
         halation = float(look.get("halation") or 0)
         perlin = look.get("grain_mode") == "perlin" and grain > 0
+        if perlin and not ffbin.has_filter("perlin"):
+            self.say("this ffmpeg has no perlin source (it needs 7.1 or later) - "
+                     "the grain falls back to a static pattern")
+            perlin = False
         if grain or halation:
             try:
                 _post_pass(self, look, grain, halation, perlin)
@@ -1392,7 +1438,8 @@ def _post_pass(self, look, grain, halation, perlin):
                      f"tscale={look.get('grain_tscale') or 0.08}:octaves=2:"
                      f"persistence=0.5:random_mode=seed:random_seed=1",
                      "-t", f"{dur:.3f}", "-pix_fmt", "gray", "-f", "rawvideo",
-                     grain_file], check=True)
+                     grain_file], check=True, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE)
             # The pattern has a mean of its own - about 149 at these
             # settings, not 128 - so it has to be measured and subtracted.
             # Without this the "grain" is a uniform lift of the picture.
