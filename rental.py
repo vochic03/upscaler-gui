@@ -489,6 +489,16 @@ DIFFUSION_MODELS = {
     "dloral": {"fixed": 0.114, "out": 3.753, "out_pow": 1.427, "in": 0.0},
 }
 
+# The GUI sends SeedVR2 its film in 50-frame pieces (the proxy's hundred
+# seconds), and every piece pays a round trip on top of the model: the
+# upload, the answer coming back, the model loading its batch. Measured on
+# the film: 66 s of wall clock per 50-frame piece on an L40S, against 58 s
+# that the model above predicts for those frames - so about 8 s a piece.
+# One measurement; it is here because without it a 20 s sample was quoted
+# 13% under what it cost.
+PIECE_OVERHEAD_SECONDS = {"seedvr2": 8.0}
+PIECE_FRAMES = 50
+
 # The engines that have been measured on a card. The UI says so, next to
 # the price.
 MEASURED_FPS = {
@@ -725,6 +735,9 @@ class RunPod:
                              + dmodel["out"] * out_mpx ** dmodel.get("out_pow", 1.0)
                              + dmodel["in"] * in_mpx)
                 ai_seconds = frames * per_frame if frames else 0.0
+                if frames and engine in PIECE_OVERHEAD_SECONDS:
+                    pieces = -(-int(frames) // PIECE_FRAMES)
+                    ai_seconds += pieces * PIECE_OVERHEAD_SECONDS[engine]
                 rate = 1.0 / per_frame if per_frame else 0.0
             else:
                 # a guess, scaled by the output the way the measured one is

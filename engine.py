@@ -198,10 +198,12 @@ PRESETS = [
                 "frame, so it stays put instead of shimmering. The source "
                 "is de-noised first (the compression goes before the "
                 "diffusion, not after it), the result is sharpened with "
-                "CAS, and a little grain and glow give it depth. A "
-                "72-second 1080p film is about 1.7 hours and $1.60 on a "
-                "card, and the result is 1080p - the same size as the "
-                "source, with the detail put back.",
+                "CAS, and a little grain and glow give it depth. Measured "
+                "on an L40S: 66 s of card time per 2 s of film at "
+                "1440x1080, so a 72-second film is about 40 minutes and "
+                "$0.80 with the start-up - the estimate before the job "
+                "gives the exact figure. The result is 1080p, with the "
+                "detail put back.",
         "backend": "cloud",
         "cloud_engine": "seedvr2",
         "rent": True,
