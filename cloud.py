@@ -148,8 +148,12 @@ def upscale(endpoint, video_path, out_path, scale=2, model=None, denoise=None,
     if not body or body[:12].find(b"ftyp") < 0:
         raise RuntimeError("the worker did not return a video: "
                            + body[:300].decode("utf-8", "replace"))
-    with open(out_path, "wb") as fh:
+    # Written beside and then moved into place, so a half-written answer
+    # can never be mistaken for a finished one by the resume.
+    tmp = out_path + ".part"
+    with open(tmp, "wb") as fh:
         fh.write(body)
+    os.replace(tmp, out_path)
     return out_path
 
 
@@ -583,8 +587,19 @@ def face_chunked(endpoint, video_path, out_path, chunk_frames=CHUNK_FRAMES,
                             chunk_frames=chunk_frames, log=log, **kw)
 
 
+def _answer_is_done(path, frames):
+    """Is this piece's answer already here, whole?"""
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return False
+        got, _, w, h = probe_video(path)
+        return got == frames and w > 0 and h > 0
+    except Exception:
+        return False
+
+
 def upscale_chunked(endpoint, video_path, out_path, chunk_frames=CHUNK_FRAMES,
-                     log=print, should_stop=None, **kw):
+                     log=print, should_stop=None, parts_dir=None, **kw):
     """Send a long video to the worker in pieces, and join the answers.
 
     One request has about a hundred seconds behind it (Cloudflare, in front
@@ -603,19 +618,34 @@ def upscale_chunked(endpoint, video_path, out_path, chunk_frames=CHUNK_FRAMES,
         log(f"{frames} frames fit in one request")
         return upscale(endpoint, video_path, out_path, log=log, **kw)
 
-    workdir = os.path.join(os.path.dirname(os.path.abspath(out_path)), "parts")
+    # The pieces live in parts_dir when the caller gives one: a folder named
+    # after what is being asked for, so a job that died - a dropped
+    # connection, a full disk, Stop - is picked up by the next job that
+    # asks for the same thing, instead of paying for every piece again.
+    workdir = parts_dir or os.path.join(os.path.dirname(os.path.abspath(out_path)), "parts")
+    os.makedirs(workdir, exist_ok=True)
     total = len(range(0, frames, chunk_frames))
     log(f"{frames} frames ({frames/fps:.0f}s) do not fit in one request - "
         f"sending {total} pieces of up to {chunk_frames} frames")
     answers = []
+    kept = 0
     for i, start in enumerate(range(0, frames, chunk_frames)):
         end = min(start + chunk_frames, frames)
-        part = split_video(video_path, workdir, start, end, fps)
         answer = os.path.join(workdir, f"answer-{start:07d}.mp4")
+        if _answer_is_done(answer, end - start):
+            answers.append(answer)
+            kept += 1
+            continue
+        if kept and len(answers) == kept:
+            log(f"{kept} piece(s) were already done by an earlier run - kept, "
+                f"not paid for again")
+        part = split_video(video_path, workdir, start, end, fps)
         _check_stop(should_stop)
         log(f"piece {i+1}/{total}: frames {start}-{end} ({end-start} frames)")
         upscale(endpoint, part, answer, log=log, **kw)
         answers.append(answer)
+    if kept == total:
+        log(f"all {total} pieces were already done by an earlier run")
     log("joining the pieces back together…")
     concat_parts(answers, out_path, log=log)
     got, _, _, _ = probe_video(out_path)
