@@ -650,6 +650,58 @@ def main():
     except Exception as e:
         check("the finishing pass works with the clean look", False, str(e)[:140])
 
+    # 3h. the grained looks have to finish on the ffmpeg that is here. The
+    #      perlin grain source needs ffmpeg 7.1; on 6.1 (Ubuntu, Debian) the
+    #      generator failed silently and the pass died opening a grain file
+    #      that was never made - after the card was paid for.
+    try:
+        for name in ("enhance", "polished"):
+            out = os.path.join(tmp3, f"out-{name}.mp4")
+            cloud_mod.finish_locally(ai, original, out, scale=2,
+                                     look=dict(engine_mod.LOOKS[name]),
+                                     encoder="h264", target=(64, 48),
+                                     log=lambda m: None)
+            check(f"the {name} look finishes on this ffmpeg",
+                  os.path.exists(out) and os.path.getsize(out) > 0,
+                  "perlin" if __import__("ffbin").has_filter("perlin")
+                  else "no perlin here - the static grain stands in")
+    except Exception as e:
+        check("the grained looks finish on this ffmpeg", False, str(e)[:140])
+
+    # 3i. the grade must not make a dark picture heavier. eq=contrast pivots
+    #      on mid-grey, so on this material (median 41) it took the median
+    #      down six levels; colorlevels=rimin was a black CRUSH, not a lift.
+    #      A ramp from black (16) to a dark grey goes through every look's
+    #      grade: the median may not go down and the white must stay white.
+    try:
+        import numpy as np
+        ramp = os.path.join(tmp3, "ramp.mp4")
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                        "nullsrc=size=256x64:rate=25,geq=lum='16+X*219/255':cb=128:cr=128",
+                        "-frames:v", "2", "-c:v", "libx264", "-qp", "0",
+                        "-pix_fmt", "yuv420p", ramp],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+        def luma(vf):
+            raw = subprocess.run(
+                ["ffmpeg", "-v", "error", "-i", ramp, "-frames:v", "1",
+                 "-vf", (vf + "," if vf else "") + "format=yuv420p",
+                 "-f", "rawvideo", "-"], stdout=subprocess.PIPE, check=True).stdout
+            return np.frombuffer(raw, np.uint8)[:256 * 64].reshape(64, 256)[32]
+
+        base = luma("")
+        for name, lk in engine_mod.LOOKS.items():
+            vf = ",".join(engine_mod.grade_filters(lk))
+            got = luma(vf) if vf else base
+            dark = slice(0, 64)          # the bottom quarter: 16 .. ~70
+            check(f"the {name} grade does not darken the shadows",
+                  int(got[dark].astype(int).sum()) >= int(base[dark].astype(int).sum()),
+                  f"mean {base[dark].mean():.1f} -> {got[dark].mean():.1f}")
+            check(f"the {name} grade keeps the white",
+                  int(got[-1]) >= int(base[-1]) - 2, f"{base[-1]} -> {got[-1]}")
+    except Exception as e:
+        check("the grade guard runs", False, str(e)[:140])
+
     # 3e. the local worker: the one that runs on this Mac's GPU. It is a
     #      separate process from the GUI, and if it is not there the local
     #      presets are dead ends.
@@ -685,8 +737,14 @@ def main():
         check("the scratch space is there", os.path.isdir(space_guard.SCRATCH),
               space_guard.SCRATCH)
         check("the guard can see the free space", st["free_bytes"] is not None)
-        check("the iCloud Drive is there for when it is needed",
-              st["ic_cloud"] is not None, str(st["ic_cloud"]))
+        # iCloud Drive only exists on a Mac. Anywhere else (a cloud sandbox,
+        # a Linux box) there is nothing to check, and a FAIL would only
+        # teach the reader to ignore the suite.
+        if sys.platform == "darwin":
+            check("the iCloud Drive is there for when it is needed",
+                  st["ic_cloud"] is not None, str(st["ic_cloud"]))
+        else:
+            print("  skip the iCloud Drive check - this is not a Mac")
         check("the guard does nothing while there is space",
               space_guard.ensure_space(min_free_gib=1) is None)
     except Exception as e:

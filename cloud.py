@@ -687,9 +687,14 @@ def finish_locally(cloud_video, original, out_path, scale=2, look=None, encoder=
     cas = float(look.get("cas") or 0)
     halation = float(look.get("halation") or 0)
     perlin_grain = look.get("grain_mode") == "perlin" and grain > 0
+    if perlin_grain and not ffbin.has_filter("perlin"):
+        # perlin arrived in ffmpeg 7.1. Without it the generator failed
+        # silently and the pass died opening a grain file that was never
+        # made - at the very end, after the card had been paid for.
+        log("this ffmpeg has no perlin source (it needs 7.1 or later) - "
+            "the grain falls back to a static pattern")
+        perlin_grain = False
     grain_s = grain * 0.05
-    contrast = float(look.get("contrast", 0.0))
-    saturation = float(look.get("saturation", 0.0))
 
     info = json.loads(subprocess.run(
         ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams",
@@ -753,6 +758,10 @@ def finish_locally(cloud_video, original, out_path, scale=2, look=None, encoder=
              f"persistence=0.5:random_mode=seed:random_seed=1",
              "-t", f"{dur:.3f}", "-pix_fmt", "gray", "-f", "rawvideo", grain_file],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if not (os.path.exists(grain_file) and os.path.getsize(grain_file)):
+            log("the grain pattern could not be made - finishing without grain")
+            perlin_grain = False
+            grain = 0
         try:
             # The WHOLE file, not the first megabyte: the perlin field starts
             # bright and settles, so a short sample reads about 20 levels
@@ -783,13 +792,10 @@ def finish_locally(cloud_video, original, out_path, scale=2, look=None, encoder=
         filters.append(f"cas=strength={cas}")
     if grain and not perlin_grain:
         filters.append(f"noise=alls={grain}:allf=u")
-    if contrast or saturation:
-        filters.append(f"eq=contrast={1 + contrast}:saturation={1 + saturation}")
-    lift = float(look.get("black_lift") or 0)
-    if lift:
-        # Lift the black point a touch: the shadow detail of an analogue
-        # transfer never reaches zero.
-        filters.append(f"colorlevels=rimin={lift}:gimin={lift}:bimin={lift}")
+    # The grade: a luma curve and a chroma saturation, all in YUV. See
+    # engine.grade_filters for what it replaced and the measurement.
+    import engine as engine_mod
+    filters.extend(engine_mod.grade_filters(look))
     filters.append("format=yuv420p")
     shift = int(look.get("chroma_shift") or 0)
     if shift:
