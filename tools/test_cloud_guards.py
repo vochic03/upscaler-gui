@@ -18,6 +18,7 @@ not rent anything.
     python3 tools/test_cloud_guards.py
 """
 import json
+import shutil
 import os
 import subprocess
 import sys
@@ -555,6 +556,37 @@ def main():
         finally:
             cloud_mod.upscale = real_upscale
 
+        # The resume: a second run that asks for the same thing pays only
+        # for the pieces the first one did not finish.
+        sent2 = []
+
+        def _fake(endpoint, part, answer, **k):
+            sent2.append(part)
+            shutil.copy(part, answer)
+        cloud_mod.upscale = _fake
+        try:
+            rdir = os.path.join(tmp5, "resume")
+            cloud_mod.upscale_chunked("http://127.0.0.1:9", clip,
+                                      os.path.join(tmp5, "ai1.mp4"), chunk_frames=50,
+                                      log=lambda m: None, parts_dir=rdir)
+            first = len(sent2)
+            os.remove(os.path.join(rdir, "answer-0000050.mp4"))
+            with open(os.path.join(rdir, "answer-0000100.mp4"), "wb") as fh:
+                fh.write(b"half a file")         # a piece that died mid-write
+            cloud_mod.upscale_chunked("http://127.0.0.1:9", clip,
+                                      os.path.join(tmp5, "ai2.mp4"), chunk_frames=50,
+                                      log=lambda m: None, parts_dir=rdir)
+            check("a retry redoes only the pieces that are missing or broken",
+                  first == 3 and len(sent2) - first == 2,
+                  f"first run {first} pieces, retry {len(sent2) - first}")
+            n2, _, _, _ = cloud_mod.probe_video(os.path.join(tmp5, "ai2.mp4"))
+            check("the resumed film has every frame", n2 == 120, str(n2))
+            a = engine_mod.resume_dir_for(tmp5, clip, engine="seedvr2", resolution=1080)
+            b = engine_mod.resume_dir_for(tmp5, clip, engine="seedvr2", resolution=720)
+            check("a retry with other settings does not reuse the pieces", a != b)
+        finally:
+            cloud_mod.upscale = real_upscale
+
         class _Card:
             def cost_so_far(self):
                 return 1.0
@@ -628,8 +660,14 @@ def main():
             check("every card we offer exists in the catalogue", not wrong,
                   ", ".join(wrong))
         else:
-            check("every card we offer exists in the catalogue", True,
+            # Not checked is not the same as fine.
+            print("  skip every card we offer exists in the catalogue - "
                   "the catalogue could not be reached")
+        sv = [c["id"] for c in rental_mod.gpu_choices("seedvr2", api_key="",
+                                                      out_height=1080)]
+        check("a 1080p SeedVR2 job is offered the measured card first, and no A100",
+              sv and sv[0] == "NVIDIA L40S"
+              and not any("A100" in c or "A5000" in c for c in sv), ", ".join(sv))
     except Exception as e:
         check("every card we offer exists in the catalogue", False,
               str(e)[:140])

@@ -194,6 +194,23 @@ GPU_CHOICES = {
         {"id": "NVIDIA A100 80GB PCIe", "label": "A100 80 GB — $1.19/h", "vram": 80},
         {"id": "NVIDIA H100 PCIe", "label": "H100 80 GB — $2.90/h", "vram": 80},
     ],
+    # SeedVR2 has a list of its own. It used to fall through to the
+    # Real-ESRGAN list, which is how the A100 came to be offered for it.
+    #
+    # The A100 is left out on price and on evidence, not on FP8: the
+    # SeedVR2 code keeps FP8 weights as storage and does the arithmetic in
+    # BF16, so an Ampere card can run them (the "it cannot use FP8" reason
+    # in FINDINGS 3 does not hold). But the model was measured on an L40S
+    # (66 s per 50 frames at 1440x1080) and never on an A100, and the A100
+    # is about 64% dearer an hour; it would have to be that much faster to
+    # break even. The A5000 is out for the same reason and for its memory.
+    # The 4090 stays for results of 720p and below (vram_for filters it out
+    # above that); the H100 is the fallback when no L40S is to be had.
+    "seedvr2": [
+        {"id": "NVIDIA GeForce RTX 4090", "label": "RTX 4090 24 GB — $0.89/h", "vram": 24},
+        {"id": "NVIDIA L40S", "label": "L40S 48 GB — $1.09/h", "vram": 48},
+        {"id": "NVIDIA H100 PCIe", "label": "H100 80 GB — $2.90/h", "vram": 80},
+    ],
     # STAR wants about 39 GB of VRAM for its own small example, so the
     # 24 GB cards are not on the list.
     "star": [
