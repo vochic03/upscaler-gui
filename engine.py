@@ -504,6 +504,10 @@ def video_info(path):
         "vcodec": v.get("codec_name") or "?",
         "acodec": (a or {}).get("codec_name"),
         "pix_fmt": v.get("pix_fmt") or "",
+        # The de-interlace "auto" mode reads this. It was never filled in,
+        # so "auto" could never fire and an interlaced DVD capture went to
+        # the AI with its combing in it, unless "on" was chosen by hand.
+        "field_order": v.get("field_order") or "",
         "bit_rate": int(info.get("format", {}).get("bit_rate") or 0),
     }
 
@@ -574,6 +578,14 @@ class Job:
         self._cancel = False
         self._thread = None
         self._proc = None
+        # The card this job has rented, while it has one, and the money
+        # this job may spend (set by the server when a session cap is on).
+        self._rented = None
+        self.budget_usd = None
+        self.rental_cost = 0.0
+        # Called with the cost of the card once it is given back, so the
+        # session ledger is settled on what was spent, not on the estimate.
+        self.on_rental_done = None
         self._lock = threading.Lock()
 
     # --- helpers -----------------------------------------------------------
@@ -593,6 +605,27 @@ class Job:
         if secret and len(secret) > 6:
             return str(text).replace(secret, "[redacted]")
         return text
+
+    def _should_stop(self):
+        """Why the rented work must stop now, or None to carry on.
+
+        The cloud loops call this between pieces and between polls. Stop
+        used to do nothing on a rented job: it set a flag nobody on the
+        cloud path read, so the card kept working - and billing - until the
+        whole job was done.
+        """
+        if self._cancel:
+            return "cancelled"
+        if self.budget_usd is not None and self._rented is not None:
+            try:
+                spent = self._rented.cost_so_far()
+            except Exception:
+                spent = 0.0
+            if spent > self.budget_usd:
+                return (f"stopped: this card has cost about ${spent:.2f}, past "
+                        f"the ${self.budget_usd:.2f} the session cap left for "
+                        f"this job. Ask the user before spending more.")
+        return None
 
     def cancel(self):
         self._cancel = True
@@ -623,6 +656,15 @@ class Job:
             self.say("ERROR: " + str(e))
         finally:
             self._cleanup()
+            # A job that never rented a card (it failed or was refused
+            # before the pod was created) still has its booking settled -
+            # at nothing - so the ledger does not keep money it never spent.
+            if self.on_rental_done and not getattr(self, "_settled", False):
+                self._settled = True
+                try:
+                    self.on_rental_done(self.rental_cost)
+                except Exception:
+                    pass
 
     def _cleanup(self):
         for d in (os.path.join(self.work, "in"), os.path.join(self.work, "out")):
@@ -788,6 +830,24 @@ class Job:
             self.say(f"the diffusion works from a {pre_w}x{pre_h} canvas, "
                      f"its {scale}x makes {pre_w*scale}x{pre_h*scale}, and "
                      f"the finishing scales that to {dtarget[0]}x{dtarget[1]}")
+        elif engine == "seedvr2":
+            # SeedVR2 restores to a resolution (--resolution, the short
+            # side); it is not an N-times enlargement. So the guide must not
+            # be cut down by a "native scale" - that used to run here with
+            # the default model's 2x (or 4x), and a 1080p source capped at
+            # 1080p went up as 960x540: three quarters of a real picture
+            # thrown away for the model to invent back.
+            #
+            # The guide is the source as it is. It only comes down if it is
+            # bigger than the target, and it is never blown up here: an
+            # upscale adds no information, only upload bytes through a proxy
+            # that gives a request about a hundred seconds.
+            scale = 1
+            pre_w, pre_h = guide_for_restore(src_info["width"], src_info["height"], target)
+            if (pre_w, pre_h) != (even(src_info["width"]), even(src_info["height"])):
+                extra.append(f"scale={pre_w}:{pre_h}:flags=lanczos")
+            self.say(f"the guide is {pre_w}x{pre_h}: SeedVR2 restores to the "
+                     f"target, so the guide keeps all the detail the source has")
         else:
             scale = native_scale_for(model)
             if target:
@@ -898,6 +958,7 @@ class Job:
                          + ("" if estimate.get("measured", True)
                             else " - that number is a guess, the engine has "
                                  "never been measured on a card"))
+            self._rented = rented
             rented.create()
             endpoint = rented.wait_ready()
             # The image has the last word on what it can do. The check above
@@ -926,6 +987,7 @@ class Job:
                 # job id, and the pieces come back one at a time.
                 cloud.dloral_run(endpoint, upload, ai, scale=scale,
                                  api_key=opts.get("cloud_key") or None,
+                                 should_stop=self._should_stop,
                                  log=lambda m: self.say(m))
             elif engine == "star":
                 # STAR: the steerable diffusion. Same shape - a job id and
@@ -937,6 +999,7 @@ class Job:
                                chunk_len=int(opts.get("star_chunk_len") or 24),
                                width=int(opts.get("star_width") or 320),
                                api_key=opts.get("cloud_key") or None,
+                               should_stop=self._should_stop,
                                log=lambda m: self.say(m))
             else:
                 cloud.upscale_chunked(endpoint, upload, ai, scale=scale, model=model,
@@ -945,13 +1008,29 @@ class Job:
                                       resolution=(target[1] if target
                                                    else SEEDVR2_DEFAULT_SHORT),
                                       prompt=opts.get("prompt") or None,
+                                      should_stop=self._should_stop,
                                       log=lambda m: self.say(m))
         finally:
             # Give the card back whatever happened. An orphaned pod keeps
             # billing by the hour.
             if rented is not None:
                 self.stage = "returning the GPU"
-                rented.destroy()
+                try:
+                    rented.destroy()
+                finally:
+                    try:
+                        self.rental_cost = rented.cost_so_far()
+                    except Exception:
+                        self.rental_cost = 0.0
+                    self.say(f"the card cost about ${self.rental_cost:.2f} "
+                             f"(by this machine's clock)")
+                    self._rented = None
+                    if self.on_rental_done:
+                        self._settled = True
+                        try:
+                            self.on_rental_done(self.rental_cost)
+                        except Exception:
+                            pass
 
         # 3. the finishing, here.
         self.stage = "finishing on this Mac"
@@ -1531,6 +1610,18 @@ def preset_availability(preset, image=None):
 # scale of their own and do not use a Real-ESRGAN model at all, so the
 # scale check against that model does not apply to them.
 DIFFUSION_ENGINES = ("seedvr2", "dloral", "star")
+
+
+def guide_for_restore(src_w, src_h, target=None):
+    """The guide a restoring engine (SeedVR2) is given.
+
+    The source as it is, brought down only when it is bigger than the
+    target - never down to target/N, and never blown up.
+    """
+    if not target:
+        return (even(src_w), even(src_h))
+    k = min(1.0, target[0] / src_w, target[1] / src_h)
+    return (even(max(2, round(src_w * k))), even(max(2, round(src_h * k))))
 
 
 def canvas_for(target, src_w, src_h, scale):

@@ -76,6 +76,14 @@ DLORAL_SEC_PER_FRAME = 2.0
 RENTED_SPEEDUP = 12.0
 
 
+def _check_stop(should_stop):
+    """Raise if the job has been told to stop (Stop, or the budget)."""
+    if should_stop:
+        why = should_stop()
+        if why:
+            raise RuntimeError(why)
+
+
 def health(endpoint, timeout=15):
     """Ask a worker what it is."""
     url = endpoint.rstrip("/") + "/health"
@@ -260,7 +268,7 @@ def concat_parts(parts, out_path, log=print):
 
 def diffusion_run(endpoint, video_path, out_path, engine="seedvr2",
                   resolution=None, batch_size=None, scale=4, api_key=None,
-                  log=print, poll=20.0, timeout=43200):
+                  log=print, poll=20.0, timeout=43200, should_stop=None):
     """Send the video to the worker and wait for the diffusion job.
 
     The work does not fit in a request: the proxy gives a request about a
@@ -309,6 +317,7 @@ def diffusion_run(endpoint, video_path, out_path, engine="seedvr2",
     told = 0
     while time.time() - t0 < timeout:
         time.sleep(poll)
+        _check_stop(should_stop)
         try:
             req = urllib.request.Request(f"{endpoint.rstrip('/')}/diffusion/{jid}")
             req.add_header("User-Agent", USER_AGENT)
@@ -373,7 +382,7 @@ def diffusion_run(endpoint, video_path, out_path, engine="seedvr2",
 
 
 def dloral_run(endpoint, video_path, out_path, scale=4, api_key=None, log=print,
-               poll=20.0, timeout=36000):
+               poll=20.0, timeout=36000, should_stop=None):
     """Send the video to the worker and wait for the diffusion job.
 
     The work does not fit in a request: the proxy gives a request about a
@@ -415,6 +424,7 @@ def dloral_run(endpoint, video_path, out_path, scale=4, api_key=None, log=print,
     told = 0
     while time.time() - t0 < timeout:
         time.sleep(poll)
+        _check_stop(should_stop)
         try:
             req = urllib.request.Request(f"{endpoint.rstrip('/')}/dloral/{jid}")
             req.add_header("User-Agent", USER_AGENT)
@@ -483,7 +493,7 @@ def dloral_run(endpoint, video_path, out_path, scale=4, api_key=None, log=print,
 
 
 def star_run(endpoint, video_path, out_path, prompt="", upscale=4, chunk_len=24,
-             width=320, api_key=None, log=print, poll=5.0, timeout=7200):
+             width=320, api_key=None, log=print, poll=5.0, timeout=7200, should_stop=None):
     """Send the clip to the worker and wait for STAR to have it.
 
     STAR is a background job like the other diffusions: the model wants a
@@ -521,6 +531,7 @@ def star_run(endpoint, video_path, out_path, prompt="", upscale=4, chunk_len=24,
     told = 0
     while time.time() - t0 < timeout:
         time.sleep(poll)
+        _check_stop(should_stop)
         try:
             req = urllib.request.Request(f"{endpoint.rstrip('/')}/star/{jid}")
             req.add_header("User-Agent", USER_AGENT)
@@ -573,7 +584,7 @@ def face_chunked(endpoint, video_path, out_path, chunk_frames=CHUNK_FRAMES,
 
 
 def upscale_chunked(endpoint, video_path, out_path, chunk_frames=CHUNK_FRAMES,
-                     log=print, **kw):
+                     log=print, should_stop=None, **kw):
     """Send a long video to the worker in pieces, and join the answers.
 
     One request has about a hundred seconds behind it (Cloudflare, in front
@@ -601,6 +612,7 @@ def upscale_chunked(endpoint, video_path, out_path, chunk_frames=CHUNK_FRAMES,
         end = min(start + chunk_frames, frames)
         part = split_video(video_path, workdir, start, end, fps)
         answer = os.path.join(workdir, f"answer-{start:07d}.mp4")
+        _check_stop(should_stop)
         log(f"piece {i+1}/{total}: frames {start}-{end} ({end-start} frames)")
         upscale(endpoint, part, answer, log=log, **kw)
         answers.append(answer)
