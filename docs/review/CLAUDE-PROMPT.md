@@ -51,6 +51,30 @@ they are the evidence. The videos are on the `review-media` release:
 `gh release download review-media`. `drm-capture/` is a second tool and
 is lower priority - read it, but do not let it crowd out the upscaler.
 
+## First: are you local or in the cloud?
+
+This brief is written for a cloud session, but it also works unchanged if
+Claude Code is running **locally on the user's Mac** - and locally is
+better:
+
+- the Runpod key is already reachable. `keys.py` finds it in the macOS
+  Keychain by itself. Do not copy it anywhere, do not print it, and do not
+  put it in a file.
+- ffmpeg, the vendored `upscalayl` binary and the scratch space are all
+  there, so the guards all pass - including the local worker one.
+- the spend ledger lives in `~/.upscaler-gui-spend.json` on the user's disk.
+
+Either way, start the GUI with the cap on:
+
+```bash
+cd ~/upscaler-gui
+UPSCALER_SPEND_CAP_USD=25 python3 server.py --port 8790 &
+```
+
+and check the spend with `curl http://127.0.0.1:8790/api/spend`.
+
+---
+
 ## Your sandbox is not this Mac
 
 - **Start the GUI first**, with the spending cap on (below):
