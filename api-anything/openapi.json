@@ -1,0 +1,368 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Upscaler GUI",
+    "version": "1.0",
+    "description": "A local video upscaler. It enlarges and restores film with Real-ESRGAN on this Mac's own GPU, and with the DLoRAL, SeedVR2 and STAR diffusion models on a rented GPU. The cloud routes cost money and need an approval: ask for an estimate, have the user approve the price, and pass the approval id with the job.",
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8790",
+      "description": "this Mac"
+    }
+  ],
+  "tags": [
+    {
+      "name": "what it can do",
+      "description": "the engines, looks and cards"
+    },
+    {
+      "name": "jobs",
+      "description": "starting and following an upscale"
+    },
+    {
+      "name": "money",
+      "description": "estimates and the approval to spend"
+    }
+  ],
+  "paths": {
+    "/api/presets": {
+      "get": {
+        "tags": [
+          "what it can do"
+        ],
+        "summary": "The engines, the looks, the backends and the cards with their prices.",
+        "responses": {
+          "200": {
+            "description": "what this upscaler can do"
+          }
+        }
+      }
+    },
+    "/api/estimate": {
+      "post": {
+        "tags": [
+          "money"
+        ],
+        "summary": "What a cloud upscale would cost, before anything is rented.",
+        "description": "Returns the price, how long it takes and how much memory the card needs. When the body asks for a rental it also returns an approval_id: a pending approval the user has to agree to.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "description": "the clip's absolute path"
+                  },
+                  "cloud_engine": {
+                    "type": "string",
+                    "enum": [
+                      "realesrgan",
+                      "seedvr2",
+                      "dloral",
+                      "star"
+                    ]
+                  },
+                  "rent": {
+                    "type": "boolean",
+                    "description": "ask for a rental estimate"
+                  },
+                  "rent_gpu": {
+                    "type": "string",
+                    "description": "the card; the default is one that fits"
+                  },
+                  "rent_image": {
+                    "type": "string",
+                    "description": "the worker image"
+                  },
+                  "max_resolution": {
+                    "type": "string",
+                    "description": "the largest result wanted, like 1280x720"
+                  }
+                },
+                "required": [
+                  "path"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the estimate, and an approval_id when it is a rental"
+          }
+        }
+      }
+    },
+    "/api/approvals": {
+      "get": {
+        "tags": [
+          "money"
+        ],
+        "summary": "The cloud jobs waiting for the user to approve their price.",
+        "responses": {
+          "200": {
+            "description": "the pending approvals"
+          }
+        }
+      }
+    },
+    "/api/approve": {
+      "post": {
+        "tags": [
+          "money"
+        ],
+        "summary": "The user approves (or declines) a price.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "the approval id"
+                  },
+                  "yes": {
+                    "type": "boolean",
+                    "description": "yes or no"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the approval's new state"
+          }
+        }
+      }
+    },
+    "/api/run": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Start an upscale.",
+        "description": "backend 'realesrgan' runs on this Mac and is free. backend 'cloud' with a cloud_engine runs on a rented card and needs rent_approval: the id of an estimate the user approved.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "description": "the clip's absolute path"
+                  },
+                  "backend": {
+                    "type": "string",
+                    "enum": [
+                      "realesrgan",
+                      "cloud",
+                      "star"
+                    ]
+                  },
+                  "cloud_engine": {
+                    "type": "string",
+                    "enum": [
+                      "realesrgan",
+                      "seedvr2",
+                      "dloral",
+                      "star"
+                    ]
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "the Real-ESRGAN model"
+                  },
+                  "scale": {
+                    "type": "integer",
+                    "description": "2 or 4"
+                  },
+                  "look": {
+                    "type": "string",
+                    "enum": [
+                      "clean",
+                      "polished",
+                      "matte",
+                      "clean8"
+                    ]
+                  },
+                  "max_resolution": {
+                    "type": "string",
+                    "description": "the largest result wanted"
+                  },
+                  "rent": {
+                    "type": "boolean"
+                  },
+                  "rent_gpu": {
+                    "type": "string"
+                  },
+                  "rent_image": {
+                    "type": "string"
+                  },
+                  "rent_approval": {
+                    "type": "string",
+                    "description": "the approved estimate's id"
+                  }
+                },
+                "required": [
+                  "path"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the job id"
+          },
+          "400": {
+            "description": "the job needs an approval; the estimate is in the body"
+          }
+        }
+      }
+    },
+    "/api/job": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "How a job is going.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the state, the stage, the log and the output path"
+          }
+        }
+      }
+    },
+    "/api/rent/gpus": {
+      "get": {
+        "tags": [
+          "what it can do"
+        ],
+        "summary": "The cards an engine can run on, with their prices and memory.",
+        "parameters": [
+          {
+            "name": "engine",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the cards"
+          }
+        }
+      }
+    },
+    "/api/models": {
+      "get": {
+        "tags": [
+          "what it can do"
+        ],
+        "summary": "The local models.",
+        "responses": {
+          "200": {
+            "description": "the models"
+          }
+        }
+      }
+    },
+    "/api/upload": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Put a video where the upscaler can reach it.",
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the path and what the clip is"
+          }
+        }
+      }
+    },
+    "/api/source": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Serve a file (a clip to look at, an output to play).",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the file"
+          }
+        }
+      }
+    },
+    "/api/download": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "The output of a finished job.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the video"
+          }
+        }
+      }
+    }
+  }
+}

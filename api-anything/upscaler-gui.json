@@ -1,0 +1,430 @@
+{
+  "name": "upscaler-gui",
+  "displayName": "Upscaler GUI",
+  "baseUrl": "http://127.0.0.1:8790",
+  "description": "A video upscaler on this Mac. It enlarges and restores film with Real-ESRGAN on the local GPU, and with the DLoRAL, SeedVR2 and STAR diffusion models on a rented GPU. Use it to upscale a video, enhance a DVD capture, restore a film, or run a diffusion video upscale. The cloud routes cost money, so they need an approval.",
+  "operations": [
+    {
+      "name": "presets",
+      "description": "What this upscaler can do: the engines (Real-ESRGAN, SeedVR2, DLoRAL, STAR), the looks, the backends and the cards with their live prices. Read this first.",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8790/api/presets",
+        "headers": {
+          "content-type": "application/json"
+        }
+      },
+      "slots": [],
+      "volatile": [],
+      "trigger": {
+        "url": "http://127.0.0.1:8790/"
+      },
+      "match": {
+        "method": "GET",
+        "host": "127.0.0.1:8790",
+        "path": "/api/presets"
+      },
+      "response": {
+        "format": "json",
+        "contentType": "application/json"
+      },
+      "params": [],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    },
+    {
+      "name": "estimate",
+      "description": "What a cloud upscale of a video would cost, before anything is rented. The answer carries an approval id: the user has to approve that price before the job can run.",
+      "request": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8790/api/estimate",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": "{\"path\":\"{path}\",\"cloud_engine\":\"{engine}\",\"rent\":true}"
+      },
+      "slots": [
+        {
+          "param": "path",
+          "at": [
+            "body",
+            "json:/path"
+          ],
+          "template": "{path}",
+          "escape": "json"
+        },
+        {
+          "param": "engine",
+          "at": [
+            "body",
+            "json:/cloud_engine"
+          ],
+          "template": "{engine}",
+          "escape": "json"
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "http://127.0.0.1:8790/"
+      },
+      "match": {
+        "method": "POST",
+        "host": "127.0.0.1:8790",
+        "path": "/api/estimate"
+      },
+      "response": {
+        "format": "json",
+        "contentType": "application/json"
+      },
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "description": "the absolute path of the clip on this Mac",
+          "example": "/Users/you/Movies/film.mov"
+        },
+        {
+          "name": "engine",
+          "type": "string",
+          "required": true,
+          "description": "the engine: dloral, seedvr2, star or realesrgan",
+          "example": "dloral"
+        }
+      ],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    },
+    {
+      "name": "run_local",
+      "description": "Upscale a video on this Mac's own GPU with Real-ESRGAN. It costs nothing and needs no approval. The answer is a job id; ask for the job's status to see how it is going.",
+      "request": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8790/api/run",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": "{\"path\":\"{path}\",\"backend\":\"realesrgan\",\"model\":\"{model}\",\"scale\":\"{scale}\",\"look\":\"{look}\",\"max_resolution\":\"\"}"
+      },
+      "slots": [
+        {
+          "param": "path",
+          "at": [
+            "body",
+            "json:/path"
+          ],
+          "template": "{path}",
+          "escape": "json"
+        },
+        {
+          "param": "model",
+          "at": [
+            "body",
+            "json:/model"
+          ],
+          "template": "{model}",
+          "escape": "json"
+        },
+        {
+          "param": "scale",
+          "at": [
+            "body",
+            "json:/scale"
+          ],
+          "template": "{scale}",
+          "escape": "json"
+        },
+        {
+          "param": "look",
+          "at": [
+            "body",
+            "json:/look"
+          ],
+          "template": "{look}",
+          "escape": "json"
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "http://127.0.0.1:8790/"
+      },
+      "match": {
+        "method": "POST",
+        "host": "127.0.0.1:8790",
+        "path": "/api/run"
+      },
+      "response": {
+        "format": "json",
+        "contentType": "application/json"
+      },
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "description": "the clip's absolute path",
+          "example": "/Users/you/Movies/film.mov"
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "required": false,
+          "description": "the Real-ESRGAN model",
+          "example": "xintao-realesr-animevideo-x2-v3"
+        },
+        {
+          "name": "scale",
+          "type": "string",
+          "required": false,
+          "description": "2 or 4",
+          "example": "2"
+        },
+        {
+          "name": "look",
+          "type": "string",
+          "required": false,
+          "description": "the finishing: clean, polished, matte or clean8",
+          "example": "clean"
+        }
+      ],
+      "readOnly": false,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    },
+    {
+      "name": "run_cloud",
+      "description": "Upscale a video on a rented GPU with a diffusion engine (DLoRAL, SeedVR2 or STAR). It costs money, so it needs the approval id from an estimate the user has approved. The answer is a job id.",
+      "request": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8790/api/run",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": "{\"path\":\"{path}\",\"backend\":\"cloud\",\"cloud_engine\":\"{engine}\",\"look\":\"{look}\",\"max_resolution\":\"{cap}\",\"rent\":true,\"rent_approval\":\"{approval}\"}"
+      },
+      "slots": [
+        {
+          "param": "path",
+          "at": [
+            "body",
+            "json:/path"
+          ],
+          "template": "{path}",
+          "escape": "json"
+        },
+        {
+          "param": "engine",
+          "at": [
+            "body",
+            "json:/cloud_engine"
+          ],
+          "template": "{engine}",
+          "escape": "json"
+        },
+        {
+          "param": "look",
+          "at": [
+            "body",
+            "json:/look"
+          ],
+          "template": "{look}",
+          "escape": "json"
+        },
+        {
+          "param": "cap",
+          "at": [
+            "body",
+            "json:/max_resolution"
+          ],
+          "template": "{cap}",
+          "escape": "json"
+        },
+        {
+          "param": "approval",
+          "at": [
+            "body",
+            "json:/rent_approval"
+          ],
+          "template": "{approval}",
+          "escape": "json"
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "http://127.0.0.1:8790/"
+      },
+      "match": {
+        "method": "POST",
+        "host": "127.0.0.1:8790",
+        "path": "/api/run"
+      },
+      "response": {
+        "format": "json",
+        "contentType": "application/json"
+      },
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "description": "the clip's absolute path",
+          "example": "/Users/you/Movies/film.mov"
+        },
+        {
+          "name": "engine",
+          "type": "string",
+          "required": true,
+          "description": "the engine: dloral, seedvr2 or star",
+          "example": "dloral"
+        },
+        {
+          "name": "look",
+          "type": "string",
+          "required": false,
+          "description": "the finishing: clean, polished, matte or clean8",
+          "example": "clean"
+        },
+        {
+          "name": "cap",
+          "type": "string",
+          "required": false,
+          "description": "the largest result wanted, like 1280x720; empty for no limit",
+          "example": ""
+        },
+        {
+          "name": "approval",
+          "type": "string",
+          "required": true,
+          "description": "the approval id the user approved, from an estimate",
+          "example": "a1b2c3d4e5f6"
+        }
+      ],
+      "readOnly": false,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    },
+    {
+      "name": "job",
+      "description": "How a job is going: its state, its stage, its log and where its output is.",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8790/api/job?id=%7Bid%7D",
+        "headers": {
+          "content-type": "application/json"
+        }
+      },
+      "slots": [
+        {
+          "param": "id",
+          "at": [
+            "query:id"
+          ],
+          "template": "{id}",
+          "escape": "url"
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "http://127.0.0.1:8790/"
+      },
+      "match": {
+        "method": "GET",
+        "host": "127.0.0.1:8790",
+        "path": "/api/job"
+      },
+      "response": {
+        "format": "json",
+        "contentType": "application/json"
+      },
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "required": true,
+          "description": "the job id",
+          "example": "a1b2c3d4e5f6"
+        }
+      ],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    },
+    {
+      "name": "cards",
+      "description": "The cards this engine can run on, with their live price and how much memory they have.",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8790/api/rent/gpus?engine=%7Bengine%7D",
+        "headers": {
+          "content-type": "application/json"
+        }
+      },
+      "slots": [
+        {
+          "param": "engine",
+          "at": [
+            "query:engine"
+          ],
+          "template": "{engine}",
+          "escape": "url"
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "http://127.0.0.1:8790/"
+      },
+      "match": {
+        "method": "GET",
+        "host": "127.0.0.1:8790",
+        "path": "/api/rent/gpus"
+      },
+      "response": {
+        "format": "json",
+        "contentType": "application/json"
+      },
+      "params": [
+        {
+          "name": "engine",
+          "type": "string",
+          "required": true,
+          "description": "the engine",
+          "example": "dloral"
+        }
+      ],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    },
+    {
+      "name": "approvals",
+      "description": "The cloud jobs waiting for the user to approve their price.",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8790/api/approvals",
+        "headers": {
+          "content-type": "application/json"
+        }
+      },
+      "slots": [],
+      "volatile": [],
+      "trigger": {
+        "url": "http://127.0.0.1:8790/"
+      },
+      "match": {
+        "method": "GET",
+        "host": "127.0.0.1:8790",
+        "path": "/api/approvals"
+      },
+      "response": {
+        "format": "json",
+        "contentType": "application/json"
+      },
+      "params": [],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    }
+  ]
+}

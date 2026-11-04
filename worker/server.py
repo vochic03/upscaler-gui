@@ -44,6 +44,7 @@ BIN = os.environ.get("UPSCALER_BIN", "/app/bin/realesrgan-ncnn-vulkan")
 MODELS = os.environ.get("UPSCALER_MODELS", "/app/models")
 PORT = int(os.environ.get("PORT", "8000"))
 CHUNK = int(os.environ.get("CHUNK_FRAMES", "40"))
+FACE_MODEL = os.environ.get("FACE_MODEL", "/app/models/RestoreFormer.pth")
 
 # The PyTorch path, for when there is a card and torch to drive it.
 #
@@ -59,6 +60,28 @@ try:
 except Exception:
     realesrgan_cuda = None
     CUDA = False
+
+# The background diffusion job. It is only useful with DLoRAL in the image,
+# but importing it costs nothing when it is not there.
+try:
+    sys.path.insert(0, HERE)
+    import dloral_job
+except Exception:
+    dloral_job = None
+
+try:
+    sys.path.insert(0, HERE)
+    import diffusion_job
+except Exception:
+    diffusion_job = None
+
+# STAR, the steerable diffusion. Same story: only useful with the STAR
+# layer in the image, and importing it costs nothing when it is not there.
+try:
+    sys.path.insert(0, HERE)
+    import star_job
+except Exception:
+    star_job = None
 
 # A model id -> the file name the binary wants.
 MODELS_DIR = MODELS
@@ -308,13 +331,24 @@ def dloral_upscale(video_path, out_path, scale=4, log=print):
     if not os.path.isdir(repo):
         raise RuntimeError(
             "DLoRAL is not installed on this box. It needs a CUDA GPU and its "
-            "own stack (diffusers 0.25, torch 2.0.1, xformers, mmedit); see "
-            "the Dockerfile's build-dloral argument.")
+            "own stack (diffusers 0.25, torch 2.0.1, mmcv-full); see the "
+            "Dockerfile's build-dloral argument.")
     if not os.path.exists(os.path.join(models, "checkpoints", "model.pkl")):
         raise RuntimeError(
             "the DLoRAL weights (model.pkl) are missing from " + models)
-    sd = os.environ.get("DLORAL_SD", "yujingsun/stable-diffusion-2-1-base")
-    cmd = ["python3", "src/test_DLoRAL.py",
+    # DLoRAL needs torch 2.0.1 and diffusers 0.25, which cannot live in the
+    # same environment as the worker's own torch, so it has a venv of its
+    # own.
+    python = os.environ.get("DLORAL_PYTHON", "/app/venvs/dloral/bin/python")
+    if not os.path.exists(python):
+        python = "python3"
+    # The base model is baked into the image: a cold box cannot be asked to
+    # download it, and the box has no working DNS.
+    sd = os.environ.get("DLORAL_SD",
+                         "/app/DLoRAL/preset_models/stable-diffusion-2-1-base")
+    if not os.path.isdir(sd):
+        sd = "yujingsun/stable-diffusion-2-1-base"
+    cmd = [python, "src/test_DLoRAL.py",
            "--pretrained_model_path", sd,
            "--pretrained_model_name_or_path", sd,
            "--ram_path", os.path.join(models, "ram_swin_large_14m.pth"),
@@ -409,6 +443,30 @@ def process(src, out, scale=4, model=None, denoise=None, engine="realesrgan",
     return out
 
 
+def available_engines():
+    """What this image can actually do.
+
+    The diffusion engines are opt-in layers in the Dockerfile, so an image
+    built without them cannot run them - and a worker that claims
+    otherwise sends the job off to fail after the card has been rented and
+    the denoise has been done. The Dockerfile writes the same list to
+    /app/engines.json when it is built, so the truth travels with the
+    image; the directories are checked as well, because a manifest can lie.
+    """
+    engines = {"realesrgan": True, "face": os.path.exists(FACE_MODEL)}
+    for name, path in (("dloral", "/app/DLoRAL"),
+                       ("seedvr2", "/app/seedvr2"),
+                       ("star", "/app/STAR")):
+        engines[name] = os.path.isdir(path)
+    try:
+        with open("/app/engines.json") as fh:
+            for k, v in json.load(fh).items():
+                engines[k] = bool(v) and engines.get(k, True)
+    except Exception:
+        pass
+    return [k for k, v in engines.items() if v]
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -429,6 +487,36 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.rstrip("/") in ("/ping", "/ping/"):
             self._json({"status": "ok"})
             return
+        # The background diffusion job: POST /diffusion starts one, this
+        # polls it and fetches the finished pieces. The old /dloral path
+        # still works - the jobs live in two places, so both are looked in.
+        for prefix in ("/diffusion/", "/dloral/", "/star/"):
+            if self.path.startswith(prefix):
+                rest = self.path[len(prefix):]
+                name = rest.split("?")[0]
+                job = None
+                if diffusion_job is not None:
+                    job = diffusion_job.get(name.split("/")[0])
+                if job is None and dloral_job is not None:
+                    job = dloral_job.get(name.split("/")[0])
+                if job is None and star_job is not None:
+                    job = star_job.get(name.split("/")[0])
+                if not job:
+                    return self._json({"error": "no such job"}, 404)
+                if "/" in name:
+                    piece = name.split("/", 1)[1]
+                    path = job.piece_path(piece)
+                    if not path:
+                        return self._json({"error": "not ready"}, 404)
+                    with open(path, "rb") as fh:
+                        body = fh.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "video/mp4")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                return self._json(job.status())
         if self.path.rstrip("/") in ("/health", ""):
             models = []
             if os.path.isdir(MODELS_DIR):
@@ -436,7 +524,7 @@ class Handler(BaseHTTPRequestHandler):
                                 if f.endswith(".param"))
             self._json({"ok": True, "gpu": gpu_name(),
                         "models": models, "binary": os.path.exists(BIN),
-                        "engines": ["realesrgan", "seedvr2", "star", "dloral"],
+                        "engines": available_engines(),
                         "backend": "cuda" if CUDA else "ncnn",
                         "cuda_models": (realesrgan_cuda.list_models()
                                         if realesrgan_cuda else [])})
@@ -444,7 +532,80 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"error": "not found"}, 404)
 
     def do_POST(self):
-        if self.path.rstrip("/") != "/upscale":
+        route = self.path.rstrip("/")
+        if route == "/diffusion":
+            # A diffusion pass over a film takes hours; the proxy gives a
+            # request about a hundred seconds. So the worker answers with a
+            # job id and does the work in the background.
+            length = int(self.headers.get("Content-Length") or 0)
+            data = self.rfile.read(length) if length else b""
+            if not data:
+                return self._json({"error": "empty body"}, 400)
+            work = tempfile.mkdtemp(prefix="diffusion-in-")
+            try:
+                src = os.path.join(work, "in.mp4")
+                with open(src, "wb") as fh:
+                    fh.write(data)
+                resolution = self.headers.get("X-Resolution")
+                batch = self.headers.get("X-Batch")
+                job = diffusion_job.start(
+                    src,
+                    engine=(self.headers.get("X-Diffusion") or "seedvr2").lower(),
+                    resolution=int(resolution) if resolution else None,
+                    batch_size=int(batch) if batch else None,
+                    scale=int(self.headers.get("X-Scale") or 4),
+                    log=lambda m: print(m, flush=True))
+                return self._json({"job": job.id, "state": job.state})
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+        if route == "/dloral":
+            # The diffusion job does not fit in a request: the proxy gives a
+            # request about a hundred seconds and a film takes hours. So the
+            # worker answers with a job id and does the work in the
+            # background.
+            length = int(self.headers.get("Content-Length") or 0)
+            data = self.rfile.read(length) if length else b""
+            if not data:
+                return self._json({"error": "empty body"}, 400)
+            work = tempfile.mkdtemp(prefix="dloral-in-")
+            try:
+                src = os.path.join(work, "in.mp4")
+                with open(src, "wb") as fh:
+                    fh.write(data)
+                scale = int(self.headers.get("X-Scale") or 4)
+                job = dloral_job.start(src, scale=scale,
+                                       log=lambda m: print(m, flush=True))
+                return self._json({"job": job.id, "state": job.state})
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+        if route == "/star":
+            # STAR is the steerable diffusion: a short clip and a sentence
+            # describing what is in it, and it regenerates the clip at a
+            # higher resolution. The model wants a lot of VRAM and the
+            # inference takes longer than the proxy gives a request, so it
+            # is a background job like the others.
+            if star_job is None:
+                return self._json({"error": "this image has no STAR in it"}, 400)
+            length = int(self.headers.get("Content-Length") or 0)
+            data = self.rfile.read(length) if length else b""
+            if not data:
+                return self._json({"error": "empty body"}, 400)
+            work = tempfile.mkdtemp(prefix="star-in-")
+            try:
+                src = os.path.join(work, "in.mp4")
+                with open(src, "wb") as fh:
+                    fh.write(data)
+                job = star_job.start(
+                    src,
+                    prompt=(self.headers.get("X-Prompt") or "").strip(),
+                    upscale=int(self.headers.get("X-Scale") or 4),
+                    chunk_len=int(self.headers.get("X-Chunk") or 24),
+                    width=int(self.headers.get("X-Width") or 320),
+                    log=lambda m: print(m, flush=True))
+                return self._json({"job": job.id, "state": job.state})
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+        if route not in ("/upscale", "/face"):
             self._json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length") or 0)
@@ -466,8 +627,13 @@ class Handler(BaseHTTPRequestHandler):
                 fh.write(data)
             out = os.path.join(work, "out.mp4")
             t0 = time.time()
-            process(src, out, scale=scale, model=model, denoise=denoise,
-                    engine=engine, prompt=prompt, resolution=resolution)
+            if route == "/face":
+                # The faces, and nothing else. The same size in and out.
+                import face_restore
+                face_restore.restore_video(src, out, log=lambda m: print(m, flush=True))
+            else:
+                process(src, out, scale=scale, model=model, denoise=denoise,
+                        engine=engine, prompt=prompt, resolution=resolution)
             size = os.path.getsize(out)
             print(f"job done: {size/1e6:.1f} MB in {time.time()-t0:.0f}s", flush=True)
             with open(out, "rb") as fh:
