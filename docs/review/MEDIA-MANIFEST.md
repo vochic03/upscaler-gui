@@ -38,5 +38,5 @@ The before/after **images** are in the repository itself, under
 | `mne-user-tab-with-audio.webm` | 1.5 MB | the capture from the user-tab stream |
 | `upscaler-gui-src.zip` | 0.3 MB | the source as it stood earlier in the work |
 | `drm-capture-src.zip` | 0.1 MB | the drm-capture project, zipped |
-| `drm-capture/tools/packager` | 6.5 MB | shaka-packager v3.9.3, the third-party binary the DRM fixtures are built with. It is not in git: it is a public upstream build, and its OpenSSL PEM header strings trip every credential scanner in the repo. |
+| `packager` | 6.5 MB | shaka-packager v3.9.3 (the asset is the bare binary), the third-party build the DRM fixtures are made with. It is not in git: it is a public upstream build, and its OpenSSL PEM header strings trip every credential scanner in the repo. |
 
