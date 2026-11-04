@@ -118,7 +118,7 @@
         "tags": [
           "money"
         ],
-        "summary": "The user approves (or declines) a price.",
+        "summary": "The USER approves (or declines) a price - in the GUI, not through this API.",
         "requestBody": {
           "required": true,
           "content": {
@@ -145,8 +145,23 @@
         "responses": {
           "200": {
             "description": "the approval's new state"
+          },
+          "403": {
+            "description": "not the user: the call has no page token"
           }
-        }
+        },
+        "description": "Needs the X-Approve-Token header, which is handed out only inside the GUI page the user looks at. An agent cannot approve its own spending: ask for an estimate, show the user the price, and let them approve it at http://127.0.0.1:8790/. A call without the token is refused with 403.",
+        "parameters": [
+          {
+            "name": "X-Approve-Token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "the token in the GUI page (meta name=approve-token)"
+          }
+        ]
       }
     },
     "/api/run": {
