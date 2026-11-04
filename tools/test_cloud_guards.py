@@ -602,6 +602,22 @@ def main():
     except Exception as e:
         check("the rented job can be stopped", False, str(e)[:140])
 
+    # 3c7. de-interlace "auto" has to be able to fire: it reads the field
+    #       order, and video_info never used to report one.
+    try:
+        ilace = os.path.join(tempfile.mkdtemp(prefix="ilace-"), "i.mp4")
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                        "testsrc=size=128x96:rate=25", "-frames:v", "10",
+                        "-vf", "setfield=tff", "-c:v", "libx264",
+                        "-flags", "+ildct+ilme", "-x264opts", "tff=1",
+                        "-pix_fmt", "yuv420p", ilace],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        fo = engine_mod.video_info(ilace).get("field_order")
+        check("an interlaced source is seen as interlaced",
+              fo in ("tt", "bb", "tb", "bt"), repr(fo))
+    except Exception as e:
+        check("an interlaced source is seen as interlaced", False, str(e)[:140])
+
     # 3c6. the ledger is settled on what the card cost, not on the guess.
     #       (A scratch ledger: the real one is never touched by the suite.)
     try:

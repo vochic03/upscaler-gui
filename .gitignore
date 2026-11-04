@@ -13,4 +13,7 @@ drm-capture/tools/packager
 
 # the DRM content keys are secrets, and this repository is public
 *.key
+
+# the rental keys keys.py reads (keys/runpod.key and friends): a key that
+# can rent a GPU is a password, and it must never be committed
 keys/
