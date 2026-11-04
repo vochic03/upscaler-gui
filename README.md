@@ -447,6 +447,33 @@ only then can the job run. An agent cannot approve its own spending: the
 server refuses a rental that carries no approved id, and the approval is
 bound to the clip, the engine and the card it was priced for.
 
+### A spending cap, for when the agent is allowed to spend
+
+The gate above is the default, and it stays the default: a job that rents
+needs the user's approval of the price, every time.
+
+Sometimes that is the wrong shape - an unattended run, or a session where
+the user has already said "go" and does not want to be interrupted. Then the
+server can be started with a ceiling instead:
+
+```bash
+UPSCALER_SPEND_CAP_USD=25 python3 server.py --port 8790
+```
+
+With a cap set, the server approves rentals itself, up to that ceiling, and
+refuses the job that would take the session past it. The spend is written to
+a ledger *before* the job starts, so it survives a restart of the server:
+
+```bash
+curl http://127.0.0.1:8790/api/spend
+```
+
+    {"cap": 25.0, "total": 0.53, "remaining": 24.47, "jobs": [...]}
+
+The cap is the control, so it has to be a number the user chose, and the
+ceiling is not the agent's to raise. With no cap set, nothing about the gate
+changes: an agent still cannot approve its own spending.
+
 The API describes itself as well, in a machine-readable document:
 
 ```
