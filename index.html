@@ -1,0 +1,1223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Video Upscaler</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --fg: #e6e9ef;
+    --dim: #9aa3b2; --accent: #5b8cff; --ok: #3ecf8e; --warn: #ffb020; --err: #ff5f56;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    display: grid; grid-template-columns: 460px 1fr; height: 100vh;
+  }
+  #side { border-right: 1px solid var(--line); overflow-y: auto; padding: 16px; }
+  #main { overflow-y: auto; padding: 16px; }
+  h1 { font-size: 15px; margin: 0 0 2px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 18px 0 8px; }
+  p.sub { color: var(--dim); margin: 0 0 14px; font-size: 12px; }
+  label { display: block; color: var(--dim); font-size: 11px; margin: 10px 0 3px; }
+  select, input[type=text] {
+    width: 100%; background: #0c0e13; color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 9px; font: inherit;
+  }
+  select:focus, input:focus { outline: none; border-color: var(--accent); }
+  button {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 12px; font: inherit; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #07101f; font-weight: 600; width: 100%; margin-top: 14px; }
+  button.big { padding: 12px; font-size: 15px; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+
+  #drop {
+    border: 1px dashed var(--line); border-radius: 10px; padding: 18px; text-align: center;
+    color: var(--dim); background: #0c0e13; cursor: pointer; margin-bottom: 8px;
+  }
+  #drop.hot { border-color: var(--accent); color: var(--fg); }
+  #files { max-height: 190px; overflow-y: auto; background: #0c0e13; border: 1px solid var(--line); border-radius: 8px; }
+  .file { padding: 7px 9px; cursor: pointer; border-bottom: 1px solid #1b1f28; font-size: 12px; }
+  .file:hover { background: #161a22; }
+  .file.sel { background: #1d2740; color: #fff; }
+  .file small { color: var(--dim); display: block; font-size: 10.5px; }
+  .file.sel small { color: #9fb6e8; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  .meta { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 12px; }
+  .meta b { color: var(--dim); font-weight: 400; }
+
+  .bar { height: 9px; background: #0c0e13; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
+  .bar > div { height: 100%; width: 0%; background: var(--accent); transition: width .3s; }
+  .bar.done > div { background: var(--ok); }
+  .bar.err > div { background: var(--err); }
+  .status { margin-top: 7px; font-size: 12px; color: var(--dim); display: flex; justify-content: space-between; gap: 10px; }
+
+  #log {
+    background: #0a0c10; border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+    height: 260px; overflow-y: auto; white-space: pre-wrap; color: #b9c2d0; font-size: 11.5px;
+  }
+  video { width: 100%; max-width: 900px; background: #000; border: 1px solid var(--line); border-radius: 8px; display: block; }
+  .note { color: var(--dim); font-size: 11px; margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+  a { color: var(--accent); }
+  .hidden { display: none !important; }
+  .warn { color: var(--warn); }
+  .ok { color: var(--ok); }
+</style>
+</head>
+<body>
+  <div id="side">
+    <h1>Video Upscaler</h1>
+    <p class="sub">Real-ESRGAN on the Apple GPU. Pick a clip, pick a model, press go.</p>
+
+    <h2>1 · Source</h2>
+    <div id="drop">Drop a video here<br><small>or click to choose</small></div>
+    <input type="file" id="fileInput" accept="video/*" class="hidden">
+    <div id="files"></div>
+    <div class="row" style="margin-top:8px">
+      <input type="text" id="srcUrl" spellcheck="false" style="flex:1"
+             placeholder="https://… a video, or a page that has one">
+      <button id="srcUrlGo">Fetch it</button>
+    </div>
+    <p class="note" id="srcUrlNote">
+      A direct link is simply downloaded. A site with no API of its own is
+      reached through API Anything — the same way an agent reaches it.
+    </p>
+
+    <div class="card" id="srcCard" style="display:none;margin-top:10px">
+      <div class="meta" id="srcMeta"></div>
+    </div>
+
+    <h2>2 · What do you want?</h2>
+    <div id="presets"></div>
+    <div id="presetNote" class="note" style="margin-top:6px;padding-top:0;border:0"></div>
+
+    <details id="advanced" style="margin-top:14px">
+      <summary style="cursor:pointer;color:#9aa3b2;font-size:11px;letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px">
+        Advanced — every setting
+      </summary>
+
+      <label>How to upscale</label>
+    <select id="backend">
+      <option value="realesrgan">Real-ESRGAN — local, faithful, works on any length</option>
+      <option value="cloud">Cloud GPU — the AI pass on a rented GPU, the rest on this Mac</option>
+      <option value="star">STAR — cloud, diffusion, invents detail from a prompt</option>
+    </select>
+    <div id="backendNote" class="note" style="margin-top:6px;padding-top:0;border:0"></div>
+
+    <div id="localPanel">
+      <label>Model</label>
+      <select id="model"></select>
+      <div id="modelNote" class="note" style="margin-top:6px;padding-top:0;border:0"></div>
+
+      <div class="row">
+        <div>
+          <label>Scale</label>
+          <select id="scale">
+            <option value="2">2x</option>
+            <option value="3">3x</option>
+            <option value="4">4x</option>
+          </select>
+        </div>
+        <div>
+          <label>Output</label>
+          <select id="encoder"></select>
+        </div>
+      </div>
+
+      <label>Look</label>
+      <select id="look"></select>
+      <div id="lookNote" class="note" style="margin-top:6px;padding-top:0;border:0"></div>
+
+      <label>Softness — how much of the plain enlargement to mix back in</label>
+      <input type="range" id="blendOverride" min="0" max="0.7" step="0.05" value="">
+      <div id="blendNote" class="note" style="margin-top:2px;padding-top:0;border:0"></div>
+
+      <label>Maximum output size — the result is fitted inside this</label>
+      <select id="maxResolution">
+        <option value="">no limit (just the AI scale)</option>
+        <option value="1920x1080">1920x1080 — 1080p</option>
+        <option value="1280x720">1280x720 — 720p</option>
+        <option value="2560x1440">2560x1440 — 1440p</option>
+        <option value="3840x2160">3840x2160 — 4K</option>
+      </select>
+
+      <label>Motion — smooth the judder with frame interpolation</label>
+      <select id="motion">
+        <option value="0">off (keep the original frame rate)</option>
+        <option value="2">2x — 25 fps becomes 50 fps</option>
+        <option value="3">3x</option>
+        <option value="4">4x</option>
+      </select>
+
+      <label>De-interlace</label>
+      <select id="deinterlace">
+        <option value="auto">auto — only if the frames are flagged interlaced</option>
+        <option value="on">always</option>
+        <option value="off">never</option>
+      </select>
+      <label class="chk" style="margin-top:8px">
+        <input type="checkbox" id="cropBars"> crop the black bars (letterbox)
+      </label>
+
+      <label>De-noise</label>
+      <select id="denoiseEngine">
+        <option value="ffmpeg">ffmpeg (hqdn3d) — fast</option>
+        <option value="bilateral">Bilateral, as in Lifecast's UpscaleVideo.ai</option>
+      </select>
+      <div class="row" id="bilateralRow" style="display:none">
+        <div>
+          <label>Bilateral radius</label>
+          <input type="text" id="bilateralRadius" value="7">
+        </div>
+        <div>
+          <label>Strength</label>
+          <input type="text" id="bilateralStrength" value="0.85">
+        </div>
+      </div>
+    </div>
+
+    <div id="cloudPanel" class="hidden">
+      <label class="chk" style="margin-top:4px">
+        <input type="checkbox" id="rentIt"> <b>Rent a GPU for this job</b> —
+        it is hired when the job starts and given back when it ends
+      </label>
+      <div id="rentFields">
+        <label>Provider</label>
+        <select id="rentProvider">
+          <option value="runpod">Runpod — pods, the cheapest</option>
+          <option value="local">This Mac (no rental, for testing)</option>
+        </select>
+        <label>API key</label>
+        <select id="rentKeyMode">
+          <option value="stored">the stored key — env var, 0600 file, or Keychain</option>
+          <option value="paste">paste one for this session only (never saved)</option>
+        </select>
+        <input type="text" id="rentKey" class="hidden" spellcheck="false"
+               autocomplete="off" placeholder="pasted for this session only">
+        <div id="keyWhere" class="note" style="margin-top:4px;padding-top:0;border:0"></div>
+        <div class="row">
+          <div>
+            <label>GPU</label>
+            <select id="rentGpu"></select>
+          </div>
+          <div>
+            <label>Container image</label>
+            <input type="text" id="rentImage" spellcheck="false" placeholder="docker.io/bzz1/upscaler:latest">
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="rentCheck">Check the key</button>
+          <button id="rentGpuRefresh">Refresh the GPU list</button>
+        </div>
+        <label class="check" style="margin-top:10px">
+          <input type="checkbox" id="rentKeepWarm">
+          <span>Keep the card between jobs</span>
+        </label>
+        <p class="note">
+          The GPU is released when the job ends, and the card is stopped
+          rather than thrown away — so the weights stay on its disk and the
+          next run of the same engine does not download them again. The
+          diffusion weights are eleven gigabytes and Hugging Face serves
+          them at 5–9 MB/s, which is twenty minutes of card time on every
+          run. A stopped card still costs its volume disk
+          ($0.20/GB/month), so throw them away when you are done.
+        </p>
+        <div class="row">
+          <button id="rentWarmClear">Throw away the parked cards</button>
+          <span id="rentWarmList" class="note" style="margin-top:8px;padding-top:0;border:0"></span>
+        </div>
+
+        <hr>
+        <label>Agents</label>
+        <p class="note">
+          API Anything turns this program's API into operations an agent can
+          call — so Claude Code, Cursor, Gemini CLI or VS Code can upscale a
+          film without you clicking. The cloud routes still need your
+          approval of the price: an agent can ask what it costs, and only
+          you can say yes.
+        </p>
+        <div class="row">
+          <button id="agentsInstall">Connect my agents</button>
+          <button id="agentsRefresh">Check</button>
+        </div>
+        <div id="agentsState" class="note" style="margin-top:8px;padding-top:0;border:0"></div>
+        <div id="approvals"></div>
+        <div id="rentStatus" class="note" style="margin-top:8px;padding-top:0;border:0"></div>
+      </div>
+
+      <label>Or use a worker you already have</label>
+      <input type="text" id="cloudEndpoint" spellcheck="false" placeholder="http://localhost:8791">
+      <label>Engine on that box</label>
+      <select id="cloudEngine">
+        <option value="realesrgan">Real-ESRGAN — enlarge, faithful</option>
+        <option value="seedvr2" selected>SeedVR2 — video diffusion: detail and depth</option>
+        <option value="star">STAR — prompt-guided diffusion, steerable</option>
+        <option value="dloral">DLoRAL — one-step diffusion, temporally consistent</option>
+      </select>
+      <div id="directionRow">
+        <label>Direction — what should the upscale invent?</label>
+        <input type="text" id="direction" spellcheck="false"
+               placeholder="1990s DVD player, soft analog bloom, gentle film grain, slightly faded colour">
+        <p class="hint">Only the prompt-guided engines use this. It is not a
+        filter description: it is the texture and the mood the model aims at
+        when it rebuilds the missing detail.</p>
+      </div>
+      <div class="row" id="cloudPriceRow">
+        <div>
+          <label>Key (optional)</label>
+          <input type="text" id="cloudKey" spellcheck="false" placeholder="Bearer …">
+        </div>
+        <div>
+          <label>GPU you are renting</label>
+          <select id="cloudPrice">
+            <option value="runpod-l40s">RunPod L40S 48 GB · $0.99/h</option>
+            <option value="runpod-4090">RunPod RTX 4090 24 GB · $0.44/h</option>
+            <option value="runpod-a5000">RunPod RTX A5000 24 GB · $0.44/h</option>
+            <option value="deepinfra-a100">DeepInfra A100 80 GB · $1.49/h</option>
+            <option value="fal-h100">fal H100 80 GB · $1.89/h</option>
+            <option value="deepinfra-h100">DeepInfra H100 80 GB · $2.90/h</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="cloudCheck">Test the connection</button>
+        <button id="cloudEstimate">What would it cost?</button>
+      </div>
+      <div id="cloudStatus" class="note" style="margin-top:8px;padding-top:0;border:0"></div>
+      <p class="note">
+        The AI pass goes to the rented GPU. The denoise, the blend, the
+        softening, the grain, the grade and the encode stay on this Mac, so
+        your machine only does the cheap CPU work.
+      </p>
+    </div>
+
+    <div id="starPanel" class="hidden">
+      <label>Prompt — describe the clip; the model invents the detail to match</label>
+      <textarea id="starPrompt" spellcheck="false"></textarea>
+      <div class="row">
+        <div>
+          <label>Start (s)</label>
+          <input type="text" id="starStart" value="0">
+        </div>
+        <div>
+          <label>Length (s)</label>
+          <input type="text" id="starSeconds" value="2">
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Input width (px)</label>
+          <select id="starWidth">
+            <option value="256">256</option>
+            <option value="320" selected>320</option>
+            <option value="480">480</option>
+            <option value="640">640</option>
+          </select>
+        </div>
+        <div>
+          <label>Upscale</label>
+          <select id="starUpscale">
+            <option value="2">2x</option>
+            <option value="4" selected>4x</option>
+          </select>
+        </div>
+      </div>
+      <div id="starStatus" class="note" style="margin-top:8px;padding-top:0;border:0"></div>
+      <div id="starSpaceOnly">
+        <label>HuggingFace token (optional) — gives the cloud GPU a bigger daily quota</label>
+        <input type="text" id="starToken" spellcheck="false" placeholder="hf_… (from huggingface.co/settings/tokens)">
+        <p class="note warn">
+          STAR runs on a free NVIDIA GPU in the cloud. <b>Your clip is uploaded to
+          huggingface.co</b> — only do this with footage you are allowed to upload.
+        </p>
+      </div>
+      <p class="note" id="starNote"></p>
+    </div>
+    </details>
+
+    <button id="go" class="primary big" disabled>Upscale</button>
+    <button id="cancel" class="hidden" style="width:100%;margin-top:8px">Stop</button>
+
+    <p class="note" id="estimate"></p>
+    <p class="note" id="privacyNote">
+      <span class="pill" style="border:1px solid var(--line);border-radius:20px;padding:1px 7px;font-size:10px">local only</span>
+      Everything runs on this machine. Nothing is uploaded anywhere.
+    </p>
+  </div>
+
+  <div id="main">
+    <div id="previewCard" class="hidden" style="margin-bottom:14px">
+      <h2 style="margin-top:0">Source</h2>
+      <video id="preview" controls playsinline></video>
+    </div>
+
+    <div id="resultCard" class="hidden" style="margin-bottom:14px">
+      <h2 style="margin-top:0">Result</h2>
+      <video id="result" controls playsinline></video>
+      <p style="margin-top:8px"><a id="dl" download>download the upscaled file</a></p>
+    </div>
+
+    <div class="card" id="progressCard" style="display:none">
+      <div class="bar" id="bar"><div></div></div>
+      <div class="status"><span id="stage">starting</span><span id="eta"></span></div>
+    </div>
+
+    <h2>Log</h2>
+    <div id="log">ready.</div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let MODELS = {}, RATES = {}, LOOK_NOTES = {}, PRESETS = [], DEFAULT_IMAGES = {}, SEEDVR2_SHORT = 1080, current = null, jobId = null, poll = null;
+
+// A preset fills in every setting at once. Picking one is the normal way
+// to use this; the Advanced panel is for when you want to change one thing.
+function applyPreset(id) {
+  const p = PRESETS.find(function (x) { return x.id === id; });
+  if (!p) return;
+  $('backend').value = p.backend;
+  if (p.model) $('model').value = p.model;
+  // The preset decides what the scale may be; the model's own limit is
+  // applied by onModelChange, which the preset overrides.
+  const maxScale = p.max_scale || 0;
+  for (const opt of $('scale').options) {
+    opt.disabled = !!(maxScale && Number(opt.value) > maxScale);
+  }
+  if (p.scale) $('scale').value = String(p.scale);
+  if (p.look) $('look').value = p.look;
+  if (p.denoise_engine) $('denoiseEngine').value = p.denoise_engine;
+  if (p.encoder) $('encoder').value = p.encoder;
+  $('cloudEngine').value = p.cloud_engine || 'realesrgan';
+  applyImagePlaceholder();
+  if (p.prompt) $('direction').value = p.prompt;
+  // Setting the select does not fire a change event, so the direction box
+  // has to be shown here as well.
+  $('directionRow').style.display = (p.cloud_engine === 'star') ? '' : 'none';
+  $('rentIt').checked = !!p.rent;
+  $('rentFields').style.display = p.rent ? '' : 'none';
+  $('presetNote').textContent = p.note || '';
+  onBackendChange();
+  onModelChange();
+  onLookChange();
+  onDenoiseChange();
+  // onModelChange may have re-capped the scale; put the preset's back.
+  if (p.scale) $('scale').value = String(p.scale);
+  // The GPU list depends on the engine, so fill it for the preset too.
+  if (p.rent) refreshRentGpus();
+}
+
+function renderPresets() {
+  // The first preset that can actually run is the one that gets picked. A
+  // disabled radio cannot be chosen, so checking it would leave the form
+  // set up for a preset that cannot run.
+  const firstOk = PRESETS.findIndex(function (p) { return p.available !== false; });
+  $('presets').innerHTML = PRESETS.map(function (p, i) {
+    // A preset that needs an engine the image does not have is a dead end.
+    // Saying so on the button is better than finding out after the denoise
+    // and after a pod has been rented.
+    const off = p.available === false;
+    const style = 'display:block;padding:9px 11px;margin-bottom:6px;'
+      + 'border:1px solid var(--line);border-radius:8px;'
+      + 'font-size:12px;background:#0c0e13;color:'
+      + (off ? 'var(--muted)' : 'var(--fg)') + ';'
+      + (off ? 'cursor:not-allowed;opacity:.7;' : 'cursor:pointer;');
+    return '<label class="preset" style="' + style + '">'
+      + '<input type="radio" name="preset" value="' + p.id + '"'
+      + (i === firstOk ? ' checked' : '') + (off ? ' disabled' : '')
+      + ' style="margin-right:7px;vertical-align:middle">'
+      + p.label
+      + (off ? '<div style="margin-top:4px;font-size:11px;line-height:1.35">'
+              + 'cannot run as it is: ' + (p.reason || 'this image does not have it')
+              + '</div>' : '')
+      + '</label>';
+  }).join('');
+  $('presets').querySelectorAll('input[name=preset]').forEach(function (r) {
+    r.onchange = function () { applyPreset(r.value); };
+  });
+  const pick = firstOk >= 0 ? PRESETS[firstOk].id : null;
+  applyPreset(pick);
+}
+
+// The image decides which engines exist, so the presets have to be asked
+// about again when the image changes. Without this the field can point at
+// a diffusion image while the button still says "cannot run as it is".
+async function reloadPresetsForImage() {
+  const img = $('rentImage').value.trim();
+  const checked = $('presets').querySelector('input[name=preset]:checked');
+  const keep = checked ? checked.value : null;
+  let m;
+  try {
+    m = await api('/api/models' + (img ? '?image=' + encodeURIComponent(img) : ''));
+  } catch (e) { return; }
+  PRESETS = m.presets || [];
+  renderPresets();
+  // Put the same preset back, if it is still one that can run.
+  if (keep) {
+    const r = $('presets').querySelector('input[name=preset][value="' + keep + '"]');
+    if (r && !r.disabled) { r.checked = true; applyPreset(keep); }
+  }
+}
+
+const LOOK_DETAIL = {
+  clean: 'The AI result on its own. Sharp and detailed, but it invents texture that was never in the picture.',
+  polished: 'Denoise first, blend the AI result 65/35 with a plain lanczos enlargement, soften it (negative sharpening), add fine grain, lift the contrast a little. This is the recipe from the Topaz thread about a DVD-like image.',
+  matte: 'Same idea, pushed further: more denoise, more of the plain enlargement, softer still, more grain. Almost no sharpening at all.',
+  clean8: 'Just the denoise, nothing else. Good when the footage is noisy but you still want it sharp.',
+};
+
+function onLookChange() {
+  $('lookNote').textContent = LOOK_DETAIL[$('look').value] || '';
+  // The softness dial follows the look unless it has been moved by hand.
+  if (!$('blendOverride').dataset.touched) {
+    $('blendOverride').value = '';
+    updateBlendNote();
+  }
+}
+
+function updateBlendNote() {
+  const v = $('blendOverride').value;
+  const el = $('blendNote');
+  if (v === '') {
+    el.textContent = 'following the look. Move it to take the invented detail out by hand.';
+    return;
+  }
+  const n = Number(v);
+  el.innerHTML = n === 0
+    ? 'pure AI — sharpest, most invented detail'
+    : '<b>' + Math.round(n * 100) + '%</b> plain enlargement mixed back in'
+      + ' — ' + (n < 0.2 ? 'nearly pure AI' : n < 0.45 ? 'a softer, film-like result' : 'mostly the plain enlargement');
+}
+
+function onDenoiseChange() {
+  $('bilateralRow').style.display = $('denoiseEngine').value === 'bilateral' ? '' : 'none';
+}
+
+function backend() { return $('backend').value; }
+
+function onBackendChange() {
+  const b = backend();
+  const isStar = b === 'star';
+  const isCloud = b === 'cloud';
+  // STAR on a rented card (the preset) needs the panel too: it says how
+  // long the clip is and how wide, and the job uses those numbers.
+  const starEngine = isCloud && $('cloudEngine').value === 'star';
+  $('localPanel').classList.toggle('hidden', isStar);
+  $('starPanel').classList.toggle('hidden', !(isStar || starEngine));
+  // The token and the upload warning are about the Hugging Face route
+  // only. On a rented card the clip goes to the card and nowhere else.
+  $('starSpaceOnly').classList.toggle('hidden', !isStar);
+  $('cloudPanel').classList.toggle('hidden', !isCloud);
+  $('go').textContent = isStar ? 'Send to STAR (cloud)'
+                    : isCloud ? 'Send the AI pass to the GPU' : 'Upscale';
+  $('backendNote').textContent = isStar
+    ? 'STAR regenerates the clip with a diffusion model, guided by your prompt. It needs a cloud GPU, so the clip is uploaded.'
+    : isCloud
+    ? 'The expensive part (the AI upscale) runs on a rented GPU; the finishing stays on this Mac so your machine stays cool.'
+    : 'Real-ESRGAN enlarges what is actually in the picture. Runs on this machine, nothing is uploaded.';
+  $('privacyNote').innerHTML = isStar
+    ? '<span class="pill" style="border:1px solid var(--line);border-radius:20px;padding:1px 7px;font-size:10px">uploads</span> '
+      + 'Your clip goes to huggingface.co. Only footage you may upload.'
+    : isCloud
+    ? '<span class="pill" style="border:1px solid var(--line);border-radius:20px;padding:1px 7px;font-size:10px">uploads</span> '
+      + 'Your clip goes to the GPU worker you set up.'
+    : '<span class="pill" style="border:1px solid var(--line);border-radius:20px;padding:1px 7px;font-size:10px">local only</span> '
+      + 'Everything runs on this machine. Nothing is uploaded anywhere.';
+  if (isStar) refreshStarStatus();
+  updateEstimate();
+}
+
+async function checkCloud() {
+  const el = $('cloudStatus');
+  const endpoint = $('cloudEndpoint').value.trim();
+  if (!endpoint) { el.textContent = 'fill in the address of your GPU worker first'; return; }
+  el.textContent = 'connecting…';
+  try {
+    const r = await fetch('/api/cloud/health?endpoint=' + encodeURIComponent(endpoint));
+    const j = await r.json();
+    if (j.ok) {
+      const w = j.worker || {};
+      el.innerHTML = '<span class="ok">connected</span> — ' + (w.gpu || 'unknown GPU')
+        + ', ' + (w.models || []).length + ' models'
+        + (w.binary ? '' : ' — <span class="warn">the model binary is missing on that box</span>');
+    } else {
+      el.innerHTML = '<span class="warn">could not reach it:</span> ' + (j.error || '');
+    }
+  } catch (e) { el.textContent = 'could not reach it: ' + e.message; }
+}
+
+async function showWarmPods() {
+  try {
+    const j = await api('/api/rent/warm');
+    const pods = (j && j.pods) || [];
+    $('rentWarmList').textContent = pods.length
+      ? pods.length + ' card(s) parked: '
+        + pods.map(p => (p.gpu || '?') + ' (' + (p.id || '') + ')').join(', ')
+      : 'no cards are parked';
+  } catch (e) {
+    $('rentWarmList').textContent = '';
+  }
+}
+
+async function agentsState() {
+  const el = $('agentsState');
+  try {
+    const j = await api('/api/agents');
+    let txt = j.installed
+      ? 'The operations are installed. An agent finds them with ' +
+        'api-anything search upscale, and calls them by name.'
+      : 'The operations are not installed yet.';
+    if (j.agents && j.agents.length) txt += '\nConnected: ' + j.agents.join(', ') + '.';
+    if (j.log) txt += '\n' + j.log;
+    el.textContent = txt;
+  } catch (e) {
+    el.textContent = 'could not check: ' + e.message;
+  }
+  await refreshApprovals();
+}
+
+// The cloud jobs an agent asked for, waiting for the user to agree to the
+// price. Nothing is rented until they do.
+async function refreshApprovals() {
+  const box = $('approvals');
+  if (!box) return;
+  try {
+    const j = await api('/api/approvals');
+    const list = (j.approvals || []).filter(function (a) { return a.state === 'pending'; });
+    if (!list.length) { box.innerHTML = ''; return; }
+    box.innerHTML = '<hr><label>Waiting for your approval</label>' +
+      list.map(function (a) {
+        return '<div class="note">An agent wants to upscale <b>' +
+          String(a.path || '').split('/').pop() + '</b> with ' +
+          (a.engine || '?') + ' on ' + (a.gpu || 'a card') +
+          ' — about <b>$' + Number(a.cost || 0).toFixed(3) + '</b>' +
+          (a.cold_cost && a.cold_cost !== a.cost
+            ? ' ($' + Number(a.cold_cost).toFixed(3) + ' the first time)' : '') +
+          '<br><button data-approve="' + a.id + '">Approve</button> ' +
+          '<button data-decline="' + a.id + '">No</button></div>';
+      }).join('');
+    box.querySelectorAll('[data-approve]').forEach(function (b) {
+      b.onclick = async function () {
+        await api('/api/approve', {id: b.getAttribute('data-approve'), yes: true});
+        log('approved');
+        refreshApprovals();
+      };
+    });
+    box.querySelectorAll('[data-decline]').forEach(function (b) {
+      b.onclick = async function () {
+        await api('/api/approve', {id: b.getAttribute('data-decline'), yes: false});
+        log('declined');
+        refreshApprovals();
+      };
+    });
+  } catch (e) { /* the box stays as it is */ }
+}
+
+async function refreshRentGpus() {
+  const engine = $('cloudEngine').value;
+  try {
+    // The cards that can be offered depend on the size of the result:
+    // a 720p result fits on a 24 GB card, a 1080p one does not.
+    const q = 'engine=' + encodeURIComponent(engine)
+      + '&w=' + (current ? (current.width || 0) : 0)
+      + '&h=' + (current ? (current.height || 0) : 0)
+      + '&cap=' + encodeURIComponent($('maxResolution').value || '');
+    const j = await api('/api/rent/gpus?' + q);
+    $('rentGpu').innerHTML = (j.gpus || []).map(function (g) {
+      return '<option value="' + g.id + '">' + g.label + '</option>';
+    }).join('');
+  } catch (e) { /* the list stays as it was */ }
+}
+
+async function checkRent() {
+  const el = $('rentStatus');
+  el.textContent = 'checking…';
+  try {
+    const provider = $('rentProvider').value;
+    const key = $('rentKeyMode').value === 'paste' ? $('rentKey').value.trim() : '';
+    const j = await api('/api/rent/check?provider=' + encodeURIComponent(provider)
+      + '&key=' + encodeURIComponent(key));
+    if (j.ok) {
+      el.innerHTML = '<span class="ok">the key works</span>'
+        + (j.pods !== undefined ? ' · ' + j.pods + ' pod(s) currently running' : '')
+        + (j.source ? ' · using the ' + j.source : '');
+    } else {
+      el.innerHTML = '<span class="warn">not working:</span> ' + (j.error || '');
+    }
+  } catch (e) { el.textContent = 'could not check: ' + e.message; }
+}
+
+async function showKeyWhere() {
+  const el = $('keyWhere');
+  const provider = $('rentProvider').value;
+  try {
+    const j = await api('/api/rent/where?provider=' + encodeURIComponent(provider));
+    el.innerHTML = '<b>Put the key here:</b><br>' + (j.where || []).join('<br>')
+      + '<br><small>Read at the moment the job starts, and never printed.</small>';
+  } catch (e) { el.textContent = ''; }
+}
+
+async function estimateCloud() {
+  const el = $('cloudStatus');
+  if (!current) { el.textContent = 'pick a video first'; return; }
+  const frames = current.frames || Math.round(current.duration * current.fps);
+  el.textContent = 'working out the cost…';
+  try {
+    const r = await fetch('/api/cloud/estimate?frames=' + frames
+      + '&model=' + encodeURIComponent($('model').value)
+      + '&price=' + encodeURIComponent($('cloudPrice').value)
+      + '&motion=' + ($('motion').value || 0));
+    const j = await r.json();
+    if (j.error) { el.textContent = j.error; return; }
+    el.innerHTML = '<b>' + j.frames + ' frames</b><br>'
+      + 'on this Mac: about <b>' + fmtDur(j.local_seconds) + '</b> of GPU work<br>'
+      + 'on ' + j.gpu + ': about <b>' + fmtDur(j.cloud_seconds) + '</b>'
+      + ' — <b>€' + j.cost_eur.toFixed(2) + '</b> (' + '$' + j.cost.toFixed(2) + ')';
+  } catch (e) { el.textContent = 'could not work it out: ' + e.message; }
+}
+
+async function refreshStarStatus() {
+  const el = $('starStatus');
+  el.textContent = 'checking the cloud spaces…';
+  try {
+    const s = await api('/api/star');
+    if (!s.available) { el.textContent = 'not usable here: ' + s.reason; return; }
+    const live = (s.spaces || []).filter(function (x) { return x.running; });
+    el.innerHTML = (s.spaces || []).map(function (x) {
+      return (x.running ? '<span class="ok">●</span> ' : '<span>○</span> ') + x.space
+        + ' <small>(' + x.stage + ')</small>';
+    }).join('<br>') + (live.length ? '' : '<br>none of them are up right now');
+    if (s.note) $('starNote').textContent = s.note;
+  } catch (e) {
+    el.textContent = 'could not check: ' + e.message;
+  }
+}
+
+function log(m) {
+  const el = $('log');
+  el.textContent += (el.textContent === 'ready.' ? '' : '\n') + m;
+  el.scrollTop = el.scrollHeight;
+}
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  };
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+// The image field is empty by default, and then the job uses the image
+// that belongs to the engine - which is not the same one for every
+// engine: the diffusion engines live in images of their own. The
+// placeholder says which one will be used, so an empty field is not a
+// mystery.
+function applyImagePlaceholder() {
+  const eng = $('cloudEngine').value === 'dloral' ? 'dloral' : 'realesrgan';
+  const img = (DEFAULT_IMAGES || {})[eng] || '';
+  $('rentImage').placeholder = img || 'docker.io/bzz1/upscaler:latest';
+}
+
+function fmtDur(s) {
+  if (!s && s !== 0) return '-';
+  const sec = Math.floor(s % 60), m = Math.floor(s / 60) % 60, h = Math.floor(s / 3600);
+  // An estimate of 168,441 seconds reads as a number. "47 hours" reads as
+  // a decision.
+  if (h >= 48) return Math.floor(h / 24) + ' days ' + (h % 24) + ' h';
+  if (h) return h + ' h ' + String(m).padStart(2, '0') + ' m';
+  const mm = Math.floor(s / 60);
+  return mm ? mm + 'm ' + String(sec).padStart(2, '0') + 's' : sec + 's';
+}
+
+function fmtSize(b) {
+  return b > 1e9 ? (b / 1e9).toFixed(2) + ' GB' : (b / 1e6).toFixed(1) + ' MB';
+}
+
+// --- load the model list ---------------------------------------------------
+async function init() {
+  const m = await api('/api/models');
+  MODELS = {};
+  RATES = m.rates || {};
+  m.models.forEach((x) => { MODELS[x.id] = x; });
+  $('model').innerHTML = m.models.map((x) =>
+    `<option value="${x.id}">${x.label}</option>`).join('');
+  $('encoder').innerHTML = m.encoders.map((x) =>
+    `<option value="${x.id}">${x.label}</option>`).join('');
+  $('look').innerHTML = (m.looks || []).map((x) =>
+    `<option value="${x.id}">${x.label}</option>`).join('');
+  LOOK_NOTES = {};
+  (m.looks || []).forEach(function (x) { LOOK_NOTES[x.id] = x.label; });
+  PRESETS = m.presets || [];
+  DEFAULT_IMAGES = m.default_images || {};
+  SEEDVR2_SHORT = m.seedvr2_short || 1080;
+  renderPresets();
+  applyImagePlaceholder();
+  if (!m.binary_ok) log('WARNING: the upscaler binary is missing at ' + m.binary);
+  $('model').onchange = onModelChange;
+  $('scale').onchange = updateEstimate;
+  $('look').onchange = onLookChange;
+  // The cap changes the size of the result, so the line that says what the
+  // result will be has to be told about it.
+  $('maxResolution').onchange = function () {
+    updateEstimate();
+    // The size of the result decides which cards can do the job.
+    if ($('rentIt') && $('rentIt').checked) refreshRentGpus();
+  };
+  $('blendOverride').addEventListener('input', function () {
+    this.dataset.touched = '1';
+    updateBlendNote();
+  });
+  $('denoiseEngine').onchange = onDenoiseChange;
+  $('backend').onchange = onBackendChange;
+  $('cloudEngine').onchange = function () { $('cloudPriceRow').style.display = $('cloudEngine').value === 'dloral' ? 'none' : ''; };
+  $('cloudCheck').onclick = checkCloud;
+  $('cloudEstimate').onclick = estimateCloud;
+  $('rentCheck').onclick = checkRent;
+  $('rentKeyMode').onchange = function () {
+    $('rentKey').classList.toggle('hidden', $('rentKeyMode').value !== 'paste');
+    if ($('rentKeyMode').value === 'stored') showKeyWhere();
+  };
+  $('rentProvider').onchange = showKeyWhere;
+  showKeyWhere();
+  $('rentGpuRefresh').onclick = refreshRentGpus;
+  $('srcUrlGo').onclick = selectUrl;
+  $('srcUrl').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); selectUrl(); }
+  });
+  $('agentsRefresh').onclick = agentsState;
+  $('agentsInstall').onclick = async function () {
+    $('agentsState').textContent = 'connecting the agents…';
+    try {
+      const j = await api('/api/agents/install', {});
+      $('agentsState').textContent = j.log || 'done';
+      agentsState();
+    } catch (e) {
+      $('agentsState').textContent = 'could not connect them: ' + e.message;
+    }
+  };
+  $('rentWarmClear').onclick = async function () {
+    $('rentWarmList').textContent = 'looking…';
+    try {
+      const j = await api('/api/rent/warm?clear=1');
+      $('rentWarmList').textContent = j.ok
+        ? ('thrown away ' + (j.cleared || 0) + ' card(s)')
+        : ('could not: ' + (j.error || '?'));
+    } catch (e) {
+      $('rentWarmList').textContent = 'could not: ' + e.message;
+    }
+  };
+  $('rentImage').addEventListener('input', function () {
+    // The image carries the engines, so the presets have to be asked about
+    // again when it changes.
+    clearTimeout(window.__presetTimer);
+    window.__presetTimer = setTimeout(reloadPresetsForImage, 400);
+  });
+  $('rentIt').onchange = function () {
+    $('rentFields').style.display = $('rentIt').checked ? '' : 'none';
+    if ($('rentIt').checked) refreshRentGpus();
+  };
+  $('rentKeepWarm').onchange = function () { showWarmPods(); };
+  $('cloudEngine').onchange = function () {
+    $('cloudPriceRow').style.display = $('cloudEngine').value === 'dloral' ? 'none' : '';
+    $('directionRow').style.display = $('cloudEngine').value === 'star' ? '' : 'none';
+    applyImagePlaceholder();
+    // The diffusion engines have their own scale, so switching to one frees
+    // the scale dropdown - and switching back leaves it on a value the model
+    // cannot do. The job then refuses with "cannot go beyond 2x".
+    onModelChange();
+    // STAR brings its own panel, whichever way it is going to run.
+    onBackendChange();
+    refreshRentGpus();
+  };
+  ['starStart', 'starSeconds', 'starWidth', 'starUpscale'].forEach(function (id) {
+    $(id).addEventListener('input', updateEstimate);
+  });
+  $('motion').addEventListener('change', function () {
+    updateEstimate();
+    if (backend() === 'cloud') estimateCloud();
+  });
+  onModelChange();
+  onLookChange();
+  onBackendChange();
+  // Fill in STAR's defaults and see which cloud spaces are alive.
+  try {
+    const s = await api('/api/star');
+    if (s.defaults) {
+      $('starPrompt').value = s.defaults.prompt || '';
+      $('starSeconds').value = s.defaults.seconds;
+      $('starWidth').value = s.defaults.width;
+    }
+  } catch (e) { /* the panel shows the problem when it is opened */ }
+  loadLibrary();
+}
+
+function onModelChange() {
+  const m = MODELS[$('model').value];
+  if (!m) return;
+  const sel = $('scale');
+  // The diffusion engines have their own scale, so the model's limit does
+  // not apply to them.
+  const dloral = backend() === 'cloud' && $('cloudEngine').value === 'dloral';
+  if (!dloral) {
+    for (const opt of sel.options) {
+      opt.disabled = !!(m.max_scale && Number(opt.value) > m.max_scale);
+    }
+    if (sel.selectedOptions[0] && sel.selectedOptions[0].disabled) sel.value = String(m.max_scale);
+  } else {
+    for (const opt of sel.options) opt.disabled = false;
+  }
+  // Prefer the scale the network was trained for.
+  if (m.native_scale && !sel.value) sel.value = String(m.native_scale);
+
+  let txt = m.note;
+  if (m.max_scale) txt += ' · max ' + m.max_scale + 'x';
+  if (m.native_scale) txt += ' · native ' + m.native_scale + 'x';
+  if (m.rate) txt += ' · measured ' + m.rate.toFixed(2) + ' frames/s';
+  else if (m.depth) txt += ' · network depth ' + m.depth + ' (bigger = slower)';
+  // Every model except the three video ones is an x4 network, so asking one
+  // for 2x does the same work and throws half of it away.
+  const want = Number(sel.value);
+  if (!dloral && m.native_scale && want < m.native_scale) {
+    txt += ' — this is an x' + m.native_scale + ' network: at ' + want
+         + 'x it does the same work and throws half away';
+  }
+  $('modelNote').textContent = txt;
+  updateEstimate();
+}
+
+function updateEstimate() {
+  const el = $('estimate');
+  if (!current) { el.textContent = ''; return; }
+  if (backend() === 'star') {
+    const secs = Number($('starSeconds').value) || 2;
+    const w = Number($('starWidth').value) || 320;
+    const up = Number($('starUpscale').value) || 4;
+    el.innerHTML = `STAR gets a <b>${w}px</b> wide, <b>${secs}s</b> clip and `
+      + `generates it at <b>${w * up}px</b> wide, in the cloud`;
+    return;
+  }
+  const s = Number($('scale').value);
+  const eng = backend() === 'cloud' ? $('cloudEngine').value : 'realesrgan';
+  const cap = $('maxResolution').value;
+  const even = (v) => Math.max(2, Math.floor(v / 2) * 2);
+  const fit = (cw, ch) => {
+    const k = Math.min(cw / current.width, ch / current.height);
+    return [even(current.width * k), even(current.height * k)];
+  };
+  let w, h;
+  let frames = current.frames || Math.round(current.duration * current.fps);
+  if (eng === 'dloral') {
+    // DLoRAL works from a canvas a quarter of the result, so the result
+    // is the TARGET: the cap, or the size of the source when there is no
+    // cap. It is not the source times four - a 1080p film asked for four
+    // times itself would be a 4320p one.
+    if (cap) {
+      const p = cap.split('x').map(Number);
+      [w, h] = fit(p[0], p[1]);
+    } else {
+      w = current.width;
+      h = current.height;
+    }
+  } else if (eng === 'seedvr2') {
+    // SeedVR2 restores at 1x, so the result is the size it was asked
+    // for: the cap, or the source at the short side the job asks for.
+    if (cap) {
+      const p = cap.split('x').map(Number);
+      [w, h] = fit(p[0], p[1]);
+    } else {
+      const short = SEEDVR2_SHORT || 1080;
+      [w, h] = fit(current.width * short / current.height, short);
+    }
+  } else if (eng === 'star') {
+    // STAR regenerates a SHORT CLIP, not the film: the clip is cut and
+    // shrunk to what the model can hold, and the result is the clip times
+    // the factor.
+    const up = Number($('starUpscale').value) || 4;
+    const cw = Number($('starWidth').value) || 320;
+    const secs = Number($('starSeconds').value) || 2;
+    w = cw * up;
+    h = Math.max(2, Math.round(w * current.height / current.width));
+    frames = Math.min(current.frames || 1e9, Math.round(secs * 25));
+  } else {
+    w = Math.floor(current.width * s / 2) * 2;
+    h = Math.floor(current.height * s / 2) * 2;
+  }
+  const model = $('model').value;
+  const rate = RATES[model];
+  let when;
+  if (backend() === 'cloud') {
+    when = 'the AI pass goes to the rented GPU; the finishing stays here';
+  } else if (rate) {
+    when = `about <b>${fmtDur(frames / rate)}</b> of GPU work `
+         + `(measured: ${rate.toFixed(2)} frames/s with this model)`;
+  } else {
+    when = 'no timing measured for this model yet — the first run tells you';
+  }
+  el.innerHTML = `Output <b>${w}x${h}</b> · ${frames} frames · ${when}`;
+}
+
+// --- library ----------------------------------------------------------------
+async function loadLibrary() {
+  const lib = await api('/api/library');
+  if (!lib.files.length) {
+    $('files').innerHTML = '<div class="file"><small>no videos found in the watched folders</small></div>';
+    return;
+  }
+  $('files').innerHTML = lib.files.map((f, i) =>
+    `<div class="file" data-i="${i}">${f.name}<small>${f.dir} · ${fmtSize(f.size)}</small></div>`
+  ).join('');
+  $('files').querySelectorAll('.file').forEach((el) => {
+    el.onclick = () => {
+      $('files').querySelectorAll('.file').forEach((x) => x.classList.remove('sel'));
+      el.classList.add('sel');
+      selectFile(lib.files[Number(el.dataset.i)].path);
+    };
+  });
+}
+
+async function selectUrl() {
+  const url = ($('srcUrl').value || '').trim();
+  if (!url) return;
+  $('srcUrlGo').disabled = true;
+  $('srcUrlNote').textContent = 'fetching ' + url + '…';
+  try {
+    const j = await api('/api/fetch', {url});
+    $('srcUrlNote').textContent = 'got it.';
+    await selectFile(j.path);
+  } catch (e) {
+    $('srcUrlNote').textContent = 'could not fetch it: ' + e.message;
+  }
+  $('srcUrlGo').disabled = false;
+}
+
+async function selectFile(path) {
+  try {
+    const info = await api('/api/probe', { path });
+    current = info;
+    $('srcCard').style.display = '';
+    $('srcMeta').innerHTML = `
+      <b>file</b><span>${info.name}</span>
+      <b>size</b><span>${fmtSize(info.size)}</span>
+      <b>resolution</b><span>${info.width}x${info.height}</span>
+      <b>frame rate</b><span>${info.fps.toFixed(3)} fps</span>
+      <b>length</b><span>${fmtDur(info.duration)}</span>
+      <b>video</b><span>${info.vcodec}${info.acodec ? ' · audio ' + info.acodec : ' · no audio'}</span>`;
+    $('go').disabled = false;
+    $('previewCard').classList.remove('hidden');
+    $('preview').src = '/api/source?path=' + encodeURIComponent(path);
+    updateEstimate();
+  } catch (e) {
+    log('could not read that file: ' + e.message);
+  }
+}
+
+// --- drag & drop ------------------------------------------------------------
+$('drop').onclick = () => $('fileInput').click();
+$('fileInput').onchange = (e) => { if (e.target.files[0]) upload(e.target.files[0]); };
+['dragenter', 'dragover'].forEach((ev) => document.addEventListener(ev, (e) => {
+  e.preventDefault(); $('drop').classList.add('hot');
+}));
+['dragleave', 'drop'].forEach((ev) => document.addEventListener(ev, (e) => {
+  e.preventDefault(); $('drop').classList.remove('hot');
+}));
+document.addEventListener('drop', (e) => {
+  if (e.dataTransfer.files && e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
+});
+
+async function upload(file) {
+  log('uploading ' + file.name + ' (' + fmtSize(file.size) + ')…');
+  $('drop').textContent = 'uploading…';
+  try {
+    const r = await fetch('/api/upload?name=' + encodeURIComponent(file.name),
+                          { method: 'POST', body: file });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    $('drop').innerHTML = 'Drop a video here<br><small>or click to choose</small>';
+    await loadLibrary();
+    selectFile(j.path);
+  } catch (e) {
+    log('upload failed: ' + e.message);
+    $('drop').innerHTML = 'Drop a video here<br><small>or click to choose</small>';
+  }
+}
+
+// --- run --------------------------------------------------------------------
+$('go').onclick = async () => {
+  if (!current) return;
+  const path = current.path;
+  const body = { path: path, backend: backend() };
+  if (body.backend === 'star') {
+    body.star_prompt = $('starPrompt').value;
+    body.star_start = Number($('starStart').value) || 0;
+    body.star_seconds = Number($('starSeconds').value) || 2;
+    body.star_width = Number($('starWidth').value) || 320;
+    body.star_upscale = Number($('starUpscale').value) || 4;
+    body.hf_token = $('starToken').value.trim();
+  } else {
+    body.model = $('model').value;
+    body.scale = Number($('scale').value);
+    body.encoder = $('encoder').value;
+    body.look = $('look').value;
+    body.denoise_engine = $('denoiseEngine').value;
+    body.bilateral_radius = Number($('bilateralRadius').value) || 7;
+    body.bilateral_strength = Number($('bilateralStrength').value) || 0.85;
+    body.blend_override = $('blendOverride').value;
+    body.max_resolution = $('maxResolution').value;
+    body.motion = Number($('motion').value) || 0;
+    body.deinterlace = $('deinterlace').value;
+    body.crop = $('cropBars').checked ? "auto" : "";
+    if (body.backend === 'cloud') {
+      body.cloud_endpoint = $('cloudEndpoint').value.trim();
+      body.cloud_key = $('cloudKey').value.trim();
+      body.cloud_engine = $('cloudEngine').value;
+      body.prompt = $('direction').value.trim();
+      body.rent = $('rentIt').checked;
+      body.rent_keep_warm = $('rentKeepWarm').checked;
+      body.rent_provider = $('rentProvider').value;
+      body.rent_key = $('rentKeyMode').value === 'paste'
+        ? $('rentKey').value.trim() : '';
+      body.rent_gpu = $('rentGpu').value;
+      body.rent_image = $('rentImage').value.trim();
+    }
+  }
+  // A job that rents a GPU has to be costed and approved first. The
+  // estimate is extrapolated in advance - one clip, and a batch - and
+  // nothing is rented until the user says yes.
+  if (body.rent) {
+    const est = await api('/api/estimate', body);
+    if (est.error) {
+      log('cannot estimate: ' + est.error);
+      return;
+    }
+    const rows = (est.batches || []).map(function (b) {
+      return b.clips + ' clip' + (b.clips > 1 ? 's' : '') + ' in one session: $' +
+             b.cost.toFixed(3);
+    }).join('\n');
+    // The duration matters as much as the money: forty-seven hours on a
+    // card is a different decision from forty-seven seconds, and in raw
+    // seconds it reads as a number nobody can feel.
+    const guess = est.measured === false;
+    // The cold start. A diffusion engine needs its weights, and if the
+    // card does not have them it fetches them from Hugging Face at five to
+    // nine megabytes a second - twenty-five minutes for DLoRAL's eleven
+    // gigabytes. That time is billed like any other, so the number the
+    // user approves has to include it.
+    const cold = (est.fetch_cost > 0)
+      ? '\nThe card also fetches the weights (' + Math.round(est.weights_mb / 1000)
+        + ' GB, about ' + Math.round(est.fetch_seconds / 60) + ' min) - about $'
+        + est.fetch_cost.toFixed(3) + ' - unless they are already on the volume.\n'
+        + 'First run on a cold card: about $' + est.first_run_cost.toFixed(3) + '.'
+        + '\nAfter that, with the weights on the volume: about $'
+        + est.one_clip_cost.toFixed(3) + ' a clip.\n'
+      : '';
+    const msg = 'Renting ' + est.gpu + ' at $' + est.price_per_hour + '/h.\n' +
+      'This clip is ' + est.seconds_of_video + 's (' + est.frames + ' frames); ' +
+      'about ' + fmtDur(est.ai_seconds) + ' of AI work on the card' +
+      (guess ? '\n  (a GUESS - this engine has never been measured on a card)' : '') +
+      ' and ' + Math.round(est.spin_up_seconds / 60) + ' min of pod start-up.\n' +
+      (est.vram_gb ? 'The card needs ' + est.vram_gb + ' GB of VRAM for a result this size.\n' : '') +
+      cold +
+      'One clip now: about $' + est.one_clip_cost.toFixed(3) + '.\n' + rows +
+      (est.ai_seconds > 4 * 3600
+        ? '\n\nThat is over FOUR HOURS on a card at $' + est.price_per_hour
+          + '/h - it will be running all night. It is not a mistake, but'
+          + ' it is a decision: a smaller result is much cheaper.'
+        : est.ai_seconds > 3600
+        ? '\n\nThat is over an hour on a card at $' + est.price_per_hour
+          + '/h. It is not a mistake, but it is a decision.'
+        : '') +
+      '\n\nCreate the pod?';
+    if (!window.confirm(msg)) {
+      log('not rented - cancelled');
+      return;
+    }
+    // The consent has to be the user's, and it has to be the server's
+    // approval id: the server issues it with the estimate, the user
+    // agrees to it here, and the job carries it. An agent cannot write
+    // its own consent.
+    const aid = est.approval_id;
+    if (!aid) {
+      log('the estimate did not come with an approval - nothing was rented');
+      return;
+    }
+    const ok = await api('/api/approve', {id: aid, yes: true});
+    if (!ok || ok.state !== 'approved') {
+      log('the approval did not go through - nothing was rented');
+      return;
+    }
+    body.rent_approval = aid;
+    body.rent_approved = true;
+    body.rent_estimate = est;
+  }
+  try {
+    const r = await api('/api/run', body);
+    jobId = r.id;
+    $('go').disabled = true;
+    $('cancel').classList.remove('hidden');
+    $('progressCard').style.display = '';
+    $('bar').className = 'bar';
+    $('resultCard').classList.add('hidden');
+    log('job ' + jobId + ' started');
+    poll = setInterval(tick, 700);
+  } catch (e) {
+    log('could not start: ' + e.message);
+  }
+};
+
+$('cancel').onclick = async () => {
+  if (!jobId) return;
+  await api('/api/cancel', { id: jobId });
+  log('stopping…');
+};
+
+async function tick() {
+  if (!jobId) return;
+  let j;
+  try { j = await api('/api/job?id=' + jobId); } catch (e) { return; }
+  const bar = $('bar');
+  bar.querySelector('div').style.width = (j.progress * 100).toFixed(1) + '%';
+  $('stage').textContent = j.stage + (j.frames_total
+    ? ` · ${j.frames_done}/${j.frames_total} frames` : '');
+  $('eta').textContent = j.eta != null ? 'eta ' + fmtDur(j.eta) : '';
+
+  if (j.log && j.log.length) {
+    const el = $('log');
+    const last = el.textContent.split('\n').slice(-1)[0];
+    if (j.log[j.log.length - 1] !== last) {
+      j.log.forEach((l) => { if (!el.textContent.includes(l)) el.textContent += '\n' + l; });
+      el.scrollTop = el.scrollHeight;
+    }
+  }
+
+  if (j.state === 'done') {
+    clearInterval(poll); poll = null; jobId = null;
+    bar.className = 'bar done';
+    $('stage').textContent = 'done';
+    $('eta').textContent = '';
+    $('go').disabled = false;
+    $('cancel').classList.add('hidden');
+    $('resultCard').classList.remove('hidden');
+    $('result').src = '/api/download?id=' + j.id;
+    $('dl').href = '/api/download?id=' + j.id;
+    $('dl').textContent = 'download ' + j.output.split('/').pop();
+  } else if (j.state === 'error' || j.state === 'cancelled') {
+    clearInterval(poll); poll = null; jobId = null;
+    bar.className = 'bar err';
+    $('stage').textContent = j.state === 'error' ? 'failed: ' + j.error : 'stopped';
+    $('eta').textContent = '';
+    $('go').disabled = false;
+    $('cancel').classList.add('hidden');
+  }
+}
+
+init().catch((e) => log('startup failed: ' + e.message));
+</script>
+</body>
+</html>

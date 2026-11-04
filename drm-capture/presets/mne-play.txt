@@ -1,0 +1,19 @@
+# MNE Play (mneplay.me) - TVCG 2, live + 7-day catch-up
+#
+# 1. Copy this into the app's "Command from the extension popup" box and press
+#    "Parse command", then Load -> Play -> Record.
+#
+# 2. To go back in time: put a number of seconds in the "Catch-up delay" field
+#    (3600 = one hour, 7200 = two hours) BEFORE pressing Load.
+#
+# 3. For an exact programme: seek in mneplay.me's own player first, then copy
+#    the .mpd request as cURL (DevTools -> Network -> right click -> Copy as cURL)
+#    and paste it into the app instead of the command below - that URL carries
+#    the right delay and token for the position you want.
+curl 'https://rtcg-catchup.morescreens.com/RTCG_1_002/MPEG-CBCS/manifest.mpd?delay=0&id=RTCG_1_002&video_id=5&token=f887e07bc1ac59940400f5548c07e65fd2078ceb&authority_instance_id=spectar-prd-rtcg&profile_id=33429&application_installation_id=293643&uuid=6ae267aa359dc0-80137206&subscriber_id=33429&application_id=web&detected_delivery_method=mpegdash&playlist_template=nginx' \
+  -H 'referer: https://mneplay.me/' \
+  -H 'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36'
+
+# content key (KID / CEK) - extract with:
+#   python3 tools/get_key.py x 8c71ad65eac046f193910ba092c1a5e1 \
+#     "https://mneplay.me/drm.php/widevine?token=<token-from-the-manifest-url>" devices
