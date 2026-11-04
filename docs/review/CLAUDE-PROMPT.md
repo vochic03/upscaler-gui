@@ -73,6 +73,19 @@ UPSCALER_SPEND_CAP_USD=25 python3 server.py --port 8790 &
 
 and check the spend with `curl http://127.0.0.1:8790/api/spend`.
 
+**If a server is already running on 8790, check it before you start one.**
+An old server with no cap on it refuses the jobs, and there is no way to
+add one to it - stop it and start a capped one:
+
+```bash
+curl http://127.0.0.1:8790/api/spend      # "cap": 0 means stop it
+pkill -f 'server.py --port 8790'
+UPSCALER_SPEND_CAP_USD=25 nohup python3 server.py --port 8790 &
+```
+
+Use `nohup` and `&` so the server outlives the command that started it,
+and so a restart of Claude does not take the GUI down with it.
+
 ---
 
 ## Your sandbox is not this Mac
