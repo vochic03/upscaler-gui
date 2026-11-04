@@ -91,6 +91,51 @@ def agents_install(log=None):
 APPROVAL_TTL = 900          # fifteen minutes
 
 
+# A spending cap for a session in which the user has authorised an agent to
+# rent without asking for every price. OFF by default: with no cap set the
+# approval gate behaves exactly as it always has, and a job still needs the
+# user's approval of the price.
+#
+# When a cap IS set, the cap is the control instead of the human, so it is
+# enforced here - in the server, before anything is created - and every
+# cent is written down before the job starts. The ledger lives on disk, so
+# restarting the server does not hand the session a fresh allowance.
+SPEND_CAP_USD = float(os.environ.get("UPSCALER_SPEND_CAP_USD", "") or 0)
+SPEND_FILE = os.path.expanduser(
+    os.environ.get("UPSCALER_SPEND_FILE") or "~/.upscaler-gui-spend.json")
+
+
+def _load_spend():
+    try:
+        with open(SPEND_FILE) as fh:
+            d = json.load(fh)
+        if isinstance(d, dict):
+            return {"total": float(d.get("total") or 0),
+                    "jobs": list(d.get("jobs") or [])}
+    except Exception:
+        pass
+    return {"total": 0.0, "jobs": []}
+
+
+def _save_spend(state):
+    try:
+        with open(SPEND_FILE, "w") as fh:
+            json.dump(state, fh, indent=1)
+    except Exception:
+        pass
+
+
+SPEND = _load_spend()
+
+
+def _spend_report():
+    """What the session has spent and what it has left."""
+    return {"cap": SPEND_CAP_USD,
+            "total": round(SPEND["total"], 4),
+            "remaining": round(max(0.0, SPEND_CAP_USD - SPEND["total"]), 4),
+            "jobs": SPEND["jobs"][-20:]}
+
+
 def new_approval(estimate, path="", engine_name=""):
     """A pending approval for a price. Nobody has agreed to it yet."""
     aid = uuid.uuid4().hex[:12]
@@ -570,6 +615,10 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/library":
             return self._json({"files": scan_library()})
+        if path == "/api/spend":
+            # What this session has spent on cards, and what it has left.
+            return self._json(_spend_report())
+
         if path == "/api/job":
             job = JOBS.get((q.get("id") or [""])[0])
             if not job:
@@ -652,6 +701,38 @@ class Handler(BaseHTTPRequestHandler):
                     # write rent_approved itself.
                     ok, why = approval_matches(
                         APPROVALS.get(_b.get("rent_approval") or ""), _b)
+                    cap_ok = False
+                    if not ok and SPEND_CAP_USD > 0:
+                        # A session spending cap. When the user has
+                        # authorised an agent to spend without asking for
+                        # every price, the cap is the control instead of
+                        # the human - so it is enforced HERE, before
+                        # anything is created, and the spend is written
+                        # down before the job starts.
+                        est = engine.estimate_rental(
+                            _b, _b.get("path") or "")
+                        cost = float(est.get("one_clip_cost") or 0)
+                        if SPEND["total"] + cost > SPEND_CAP_USD + 1e-9:
+                            return self._json({
+                                "error": "the session spending cap is "
+                                         "reached: $%.2f of $%.2f is used, "
+                                         "and this job would cost about "
+                                         "$%.2f. Ask the user to raise it."
+                                         % (SPEND["total"], SPEND_CAP_USD,
+                                            cost),
+                                "needs_approval": True,
+                                "spend": _spend_report(),
+                            }, 400)
+                        SPEND["total"] = round(SPEND["total"] + cost, 4)
+                        SPEND["jobs"].append({
+                            "path": _b.get("path"),
+                            "engine": _b.get("cloud_engine") or "",
+                            "cost": cost, "at": time.time()})
+                        _save_spend(SPEND)
+                        _b["rent_approved"] = True
+                        _b["rent_estimate"] = est
+                        ok = True
+                        cap_ok = True
                     if not ok:
                         return self._json({
                             "error": "this job would rent a GPU and it has "
@@ -661,12 +742,14 @@ class Handler(BaseHTTPRequestHandler):
                             "needs_approval": True,
                             "estimate": engine.estimate_rental(
                                 _b, _b.get("path") or ""),
+                            "spend": _spend_report(),
                         }, 400)
                     # The approval IS the consent: the engine's own gate
                     # sees it and lets the pod be created.
-                    _b["rent_approved"] = True
-                    _b["rent_estimate"] = APPROVALS[
-                        _b["rent_approval"]]["estimate"]
+                    if not cap_ok:
+                        _b["rent_approved"] = True
+                        _b["rent_estimate"] = APPROVALS[
+                            _b["rent_approval"]]["estimate"]
             except Exception:
                 pass
             body = self._json_body()

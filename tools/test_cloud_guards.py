@@ -170,16 +170,104 @@ def main():
 
     # A job that would rent a GPU needs the user's approval of the price,
     # and the approval is the server's: an agent cannot write its own.
-    status, refused = call("/api/run", {
-        "path": src, "backend": "cloud", "cloud_engine": "dloral", "model": "",
-        "scale": 4, "look": "polished", "denoise_engine": "bilateral",
-        "encoder": "h264", "rent": True, "rent_approved": True,
-        "rent_image": "docker.io/bzz1/upscaler:latest"})
-    check("a job that rents without an approval is refused",
-          status == 400 and not refused.get("id"),
-          json.dumps(refused)[:160])
-    check("the refusal asks for an estimate",
-          bool(refused.get("needs_approval")), json.dumps(refused)[:120])
+    #
+    # UNLESS a session spending cap has been set - which is how an agent is
+    # allowed to spend without asking for every price. Then the cap is the
+    # control instead of the human, and the server enforces it.
+    _, spend = call("/api/spend")
+    cap = float(spend.get("cap") or 0)
+    if cap > 0:
+        check("the session spending cap is set", True,
+              "$%.2f of $%.2f used" % (spend.get("total") or 0, cap))
+        check("the spend never goes over the cap",
+              (spend.get("total") or 0) <= cap)
+    else:
+        status, refused = call("/api/run", {
+            "path": src, "backend": "cloud", "cloud_engine": "dloral", "model": "",
+            "scale": 4, "look": "polished", "denoise_engine": "bilateral",
+            "encoder": "h264", "rent": True, "rent_approved": True,
+            "rent_image": "docker.io/bzz1/upscaler:latest"})
+        check("a job that rents without an approval is refused",
+              status == 400 and not refused.get("id"),
+              json.dumps(refused)[:160])
+        check("the refusal asks for an estimate",
+              bool(refused.get("needs_approval")), json.dumps(refused)[:120])
+
+    # 3b1. The cap itself, on a server of its own: a job that would cost
+    #      more than the cap allows is refused, and nothing is created.
+    try:
+        import socket as _socket
+        import subprocess as _sp
+        import urllib.error as _ue
+        import urllib.request as _ur
+        _s = _socket.socket()
+        _s.bind(("127.0.0.1", 0))
+        _port = _s.getsockname()[1]
+        _s.close()
+        _env = dict(os.environ)
+        _env["UPSCALER_SPEND_CAP_USD"] = "0.0001"
+        _env["UPSCALER_SPEND_FILE"] = "/tmp/upscaler-guard-spend.json"
+        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        _logf = open("/tmp/upscaler-guard-server.log", "w")
+        _proc = _sp.Popen([__import__("sys").executable, "server.py", "--port", str(_port)],
+                           cwd=_root, env=_env,
+                           stdout=_logf, stderr=_sp.STDOUT)
+        _base = "http://127.0.0.1:%d" % _port
+        _ready = False
+        _why = ""
+        for _ in range(40):
+            time.sleep(0.25)
+            try:
+                _ur.urlopen(_base + "/api/models", timeout=2).read()
+                _ready = True
+                break
+            except Exception as _e:
+                _why = "%s: %s" % (type(_e).__name__, str(_e)[:100])
+        if not _ready:
+            try:
+                _txt = open("/tmp/upscaler-guard-server.log").read()[-300:]
+            except Exception:
+                _txt = "(no output)"
+            check("a server with a spending cap starts", False, "it did not answer (" + _why + ") " + _txt)
+        else:
+            _req = _ur.Request(
+                _base + "/api/run",
+                data=json.dumps({
+                    "path": src, "backend": "cloud", "cloud_engine": "dloral",
+                    "model": "", "scale": 4, "look": "polished",
+                    "denoise_engine": "bilateral", "encoder": "h264",
+                    "rent": True, "rent_approved": True,
+                    "rent_image": "docker.io/bzz1/upscaler:latest"}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                _ur.urlopen(_req, timeout=60)
+                _body = {}
+            except _ue.HTTPError as _e:
+                _body = json.loads(_e.read().decode() or "{}")
+            _err = (_body.get("error") or "").lower()
+            check("a job over the session cap is refused",
+                  "cap" in _err, (_body.get("error") or "")[:140])
+            check("the refusal names the cap",
+                  not _body.get("id"), json.dumps(_body)[:120])
+            _sp2 = json.loads(_ur.urlopen(
+                _base + "/api/spend", timeout=10).read().decode())
+            check("the capped server reports its cap",
+                  abs(float(_sp2.get("cap") or 0) - 0.0001) < 1e-9,
+                  json.dumps(_sp2)[:120])
+    except Exception as e:
+        check("the spending cap holds", False, str(e)[:140])
+    finally:
+        # The server the test started has to go with it. Eight of them
+        # were left running before this was noticed.
+        try:
+            _proc.terminate()
+            _proc.wait(timeout=5)
+        except Exception:
+            pass
+        try:
+            _logf.close()
+        except Exception:
+            pass
 
     # The whole way round: the estimate, the user's approval, the job.
     _, est = call("/api/estimate", {
