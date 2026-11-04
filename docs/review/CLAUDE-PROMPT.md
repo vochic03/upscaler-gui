@@ -53,35 +53,50 @@ is lower priority - read it, but do not let it crowd out the upscaler.
 
 ## Your sandbox is not this Mac
 
-- **Start the GUI first.** It is standard library only, no installs:
-  `python3 server.py --port 8790 &`
+- **Start the GUI first**, with the spending cap on (below):
+  `UPSCALER_SPEND_CAP_USD=25 python3 server.py --port 8790 &`
 - **ffmpeg is needed** for the guards and for any measurement:
   `apt-get install -y ffmpeg` if it is missing.
 - **One guard will fail and that is correct.** "the local worker answers"
   needs the vendored `upscalayl` binary, which is a macOS build and is
   deliberately not in the repository. Expect exactly that one failure and
   say so; do not chase it.
-- **There is no Runpod key in the sandbox.** The guards mock the pod API,
-  so they still pass. But you cannot rent anything without one - see the
-  rules.
 - The GUI binds `127.0.0.1` only. Do not expose it.
+
+## The money - this session has been authorised
+
+The user has authorised pod spending **for this engagement only**, without
+being asked for every price. The authority has a hard ceiling:
+
+- **The cap is $25 for the whole engagement.** It is enforced by the
+  server, not by your good intentions: start the GUI with
+  `UPSCALER_SPEND_CAP_USD=25`, and the server refuses any job that would
+  take the session past it.
+- **Ask for nothing before a card run.** Do not stop to ask the user to
+  approve a price. Run the job, record what it cost, and carry on.
+- **Check the spend whenever you are about to start something expensive:**
+  `curl http://127.0.0.1:8790/api/spend` returns the cap, the total and
+  what is left. Every cent is written to a ledger before the job starts.
+- **The ceiling is not yours to raise.** If the cap is reached, stop, say
+  so, and ask the user. Do not find another way to spend.
+- **The Runpod key has to be in the sandbox** for any of this to work, as
+  the environment variable `UPSCALER_RENT_KEY` (`keys.py` reads it from
+  there). If it is not there, everything else still works - only the card
+  tests are blocked - and you say so rather than trying to get around it.
+- **Never let a pod outlive its job.** The engine destroys the pod in a
+  `finally`, and the server sweeps orphans at start-up, but a pod that is
+  left running bills by the hour. After any failure, check
+  `GET /v2/pods` and delete anything that is still there.
+- The rest of the money rules still apply: keys stay in the environment or
+  the Keychain, never in a file, a log, a commit or a message.
 
 ## The rules that are not negotiable
 
-- **Never rent a GPU without an estimate stated first and an explicit
-  approval.** The user approves the price, not the task: price per hour,
-  the spin-up overhead, the projected total. The approval is server-issued
-  - an agent can ask for a price but cannot approve its own spending. If
-  you want to test something on a card, produce the estimate and stop
-  there. The estimates for the specific tests that would help are in
-  `FINDINGS.md`.
 - **No face restoration.** GFPGAN, RestoreFormer and CodeFormer are in the
   repository as an image layer and all switched off. The user judged
   RestoreFormer over an upscaled video as reading as a retouched face
   rather than as film. Leave it off, do not propose it, do not make it
   easier to turn on. The upscale, the blend and the grain carry the face.
-- **Keys live in the macOS Keychain only** - never in a file, a log, a
-  commit or a message.
 - **Do not merge, tag or release.** Open pull requests; the user merges.
 - If a session is about to end, commit and push what you have, and write
   down what is next. Do not leave the branch broken.
@@ -95,20 +110,21 @@ and what it fixed.
 1. **Verify you can run the guards.** Then read the code and write down
    what you think is wrong, before changing anything.
 2. **The finishing grade.** This is free to iterate - no card needed. The
-   measurement in `FINDINGS.md` section 2 is the baseline: the `eq=contrast`
-   stage drops 3 levels off a median of 41 and pushes 5.4% of the pixels
-   onto pure black, and the "polished" and "matte" looks push the same knob
-   harder. Measure candidates against the saved AI output and pick the one
-   that holds the shadows and gives the midtones back. **Look at the
-   pictures**, not just the numbers - the numbers can all be right and the
-   picture still be wrong.
+   measurement in `FINDINGS.md` section 2 is the baseline: the
+   `eq=contrast` stage drops 3 levels off a median of 41 and pushes 5.4%
+   of the pixels onto pure black, and the "polished" and "matte" looks push
+   the same knob harder. Measure candidates against the saved AI output
+   and pick the one that holds the shadows and gives the midtones back.
+   **Look at the pictures**, not just the numbers - the numbers can all be
+   right and the picture still be wrong.
 3. **The SeedVR2 guide.** `FINDINGS.md` section 1: the guide is a quarter
    of the target, and the model is asked to invent what was thrown away.
-   Apply the diff, or a better one. Verifying that it looks better needs
-   one 20 s comparison on a card - ask for the estimate first.
+   Apply the diff, or a better one - and then **spend**: one 20 s
+   comparison on a card, with and without the change, so the decision is
+   made on the picture and not on the reasoning.
 4. **The A100 for FP8 weights** (`FINDINGS.md` section 3) and **the missing
-   resume** (`FINDINGS.md` section 4). Both are small and both are
-   clearly wrong; decide and do.
+   resume** (`FINDINGS.md` section 4). Both are small and both are clearly
+   wrong; decide and do.
 5. **Then keep going.** You have budget left and the job is bigger than
    four findings. The DVD-look research, the guards, the cost model, the
    card lifecycle, the API-anything surface - all of it is fair game. What
@@ -141,6 +157,7 @@ and what it fixed.
 
 ## When you are done
 
-Say what you changed, what you rejected and why, what the guards said, and
-what would need the user's money or their taste to settle. If something in
-the brief turned out to be wrong, say that too.
+Say what you changed, what you rejected and why, what the guards said, what
+the cards cost (`curl http://127.0.0.1:8790/api/spend`), and what would
+still need the user's taste to settle. If something in the brief turned out
+to be wrong, say that too.
