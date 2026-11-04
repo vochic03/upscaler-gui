@@ -2,6 +2,10 @@
 
 Everything here was measured on the real material, not guessed.
 
+> **Status (review, 2026-11-04):** all four have since been acted on - see
+> `REVIEW-NOTES.md` for what changed, what was rejected and why. The text
+> below is kept as it was written.
+
 **Nothing in this file has been changed in the code.** These are deductions
 I did not act on. How the picture should look is not my call - it is the
 user's, or Claude's. What follows is the measurement, the reasoning, and a
