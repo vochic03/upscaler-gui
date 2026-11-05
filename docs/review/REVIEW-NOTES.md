@@ -172,12 +172,21 @@ Ordered by what they could cost.
 
 ## Next
 
-1. **Allow the sandbox to reach RunPod** (`api.runpod.io`, and
-   `*.proxy.runpod.net` for the pods), then run the SeedVR2 A/B: an HD
-   source with a cap, old guide against new, 20 s each, about $0.55 for
-   both.
-2. Patch and push the SeedVR2 image with the worker change, and check on
-   the card that the first piece no longer fetches weights.
-3. Resume for the diffusion, DLoRAL and STAR routes.
-4. Decide gamma 1.04 against 1.08 by eye, on a full clip with the perlin
-   grain (needs ffmpeg 7.1).
+1. ~~**Allow the sandbox to reach RunPod**, then run the SeedVR2 A/B.~~
+   **Done on the user's Mac instead** - the sandbox could not reach
+   RunPod, the Mac can. The result is in `SEEDVR2-AB.md`: the guide
+   resolution moves the detail by **+0.8%** and the sharpness by
+   **-0.9%**, and the brightness by **+5.1 levels**. The guide is not the
+   lever. The finishing is.
+2. ~~**Patch and push the SeedVR2 image with the worker change.**~~
+   **Done.** `bzz1/upscaler:seedvr2` is now
+   `sha256:30e962120691064a45bcecea71aec48be413098a88ba999ae727e97104d13915`
+   (the old one, `sha256:4487ac3b0f2d`, is still pullable by digest). The
+   image now hands the SeedVR2 CLI the weights it carries, so a pod stops
+   fetching them from Hugging Face and uses the measured 3B FP8 model.
+   `worker/entrypoint.sh` is also marked executable in git, which is why
+   the patch can be one layer.
+3. **Resume for the diffusion, DLoRAL and STAR routes.** Still open.
+4. **Decide gamma 1.04 against 1.08 by eye**, on a full clip with the
+   perlin grain (needs ffmpeg 7.1). Still open - this is the taste call,
+   and the images are in `images/grade-fix-1to1.png`.
