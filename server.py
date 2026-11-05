@@ -17,6 +17,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import secrets
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -90,6 +91,25 @@ def agents_install(log=None):
 
 APPROVAL_TTL = 900          # fifteen minutes
 
+# Who may say yes to a price.
+#
+# /api/approve used to answer anybody who could reach the port - an agent
+# driving the API (whose own description listed the endpoint), a script,
+# or a web page in the user's browser - so "an agent may not approve its
+# own spending" was a convention, not a control. Now an approval has to
+# carry this token, and the only place the token is handed out is inside
+# the GUI page itself. It is made fresh at every start and never logged.
+#
+# It is a guard against the API being used to approve, not against
+# somebody with a shell on this Mac - nothing in this process can be that.
+APPROVE_TOKEN = secrets.token_hex(16)
+
+# The only names this server answers to. A page on another site cannot
+# reach it by DNS rebinding (its Host would be that site's name), and a
+# cross-site POST carries an Origin that is not one of these.
+def _local_names(port):
+    return {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+
 
 # A spending cap for a session in which the user has authorised an agent to
 # rent without asking for every price. OFF by default: with no cap set the
@@ -126,6 +146,32 @@ def _save_spend(state):
 
 
 SPEND = _load_spend()
+# Two jobs asked for at the same moment must not both fit under the cap
+# that only has room for one: the check and the booking happen together.
+SPEND_LOCK = threading.Lock()
+
+
+def _settle_spend(entry, booked):
+    """Called when a capped job is done with its card.
+
+    The booking was the estimate; this replaces it with what the card cost
+    by this machine's clock (which errs high by half a minute). An
+    estimate can be wrong in either direction, and a cap that only ever
+    sees estimates does not cap the bill.
+    """
+    def settle(actual):
+        with SPEND_LOCK:
+            if entry.get("settled"):
+                return
+            actual = round(float(actual or 0), 4)
+            entry["actual"] = actual
+            entry["settled"] = True
+            SPEND["total"] = round(max(0.0, SPEND["total"] - booked + actual), 4)
+            _save_spend(SPEND)
+            print(f"spend: booked ${booked:.4f}, the card cost ${actual:.4f}; "
+                  f"the session has spent ${SPEND['total']:.4f} of "
+                  f"${SPEND_CAP_USD:.2f}", flush=True)
+    return settle
 
 
 def _spend_report():
@@ -361,6 +407,18 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- helpers -----------------------------------------------------------
 
+    def _local_request(self, post=False):
+        """Is this request from this machine's own GUI or a local client?"""
+        port = self.server.server_address[1]
+        names = _local_names(port)
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in names:
+            return False
+        origin = (self.headers.get("Origin") or "").strip().lower()
+        if origin and origin not in {"http://" + n for n in names}:
+            return False
+        return True
+
     def _json(self, obj, code=200):
         body = json.dumps(obj).encode()
         self.send_response(code)
@@ -387,6 +445,9 @@ class Handler(BaseHTTPRequestHandler):
     # --- routes ------------------------------------------------------------
 
     def do_GET(self):
+        if not self._local_request():
+            return self._json({"error": "this server only answers its own "
+                                        "page on this machine"}, 403)
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         path = u.path
@@ -644,6 +705,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._local_request(post=True):
+            return self._json({"error": "this server only answers its own "
+                                        "page on this machine"}, 403)
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         path = u.path
@@ -693,8 +757,17 @@ class Handler(BaseHTTPRequestHandler):
             # A job that would rent a GPU needs the approval that came with
             # the estimate. Refuse it here, before anything is created, so
             # the answer is immediate and nothing can be rented by accident.
+            _b = self._json_body()
+            if not isinstance(_b, dict):
+                return self._json({"error": "the body has to be a JSON object"}, 400)
+            # Whether a job may rent is decided HERE and only here. A
+            # client that writes "rent_approved": true into its own request
+            # is not an approval - and the fields the gate fills in for
+            # itself are not the client's to send either.
+            for _k in ("rent_approved", "rent_estimate", "_cap_entry",
+                       "_cap_booked", "_cap_budget"):
+                _b.pop(_k, None)
             try:
-                _b = self._json_body()
                 if _b.get("rent"):
                     # The consent has to be the user's: an approval the
                     # server issued and the user agreed to. An agent cannot
@@ -711,24 +784,44 @@ class Handler(BaseHTTPRequestHandler):
                         # down before the job starts.
                         est = engine.estimate_rental(
                             _b, _b.get("path") or "")
-                        cost = float(est.get("one_clip_cost") or 0)
-                        if SPEND["total"] + cost > SPEND_CAP_USD + 1e-9:
+                        if est.get("error"):
                             return self._json({
-                                "error": "the session spending cap is "
-                                         "reached: $%.2f of $%.2f is used, "
-                                         "and this job would cost about "
-                                         "$%.2f. Ask the user to raise it."
-                                         % (SPEND["total"], SPEND_CAP_USD,
-                                            cost),
-                                "needs_approval": True,
-                                "spend": _spend_report(),
-                            }, 400)
-                        SPEND["total"] = round(SPEND["total"] + cost, 4)
-                        SPEND["jobs"].append({
-                            "path": _b.get("path"),
-                            "engine": _b.get("cloud_engine") or "",
-                            "cost": cost, "at": time.time()})
-                        _save_spend(SPEND)
+                                "error": "the job could not be priced, so "
+                                         "the cap cannot be checked: "
+                                         + str(est.get("error")),
+                                "spend": _spend_report()}, 400)
+                        # The cold price: a fresh card pays the spin-up
+                        # AND the weight fetch. one_clip_cost leaves the
+                        # fetch out, so a cold DLoRAL card was booked five
+                        # minutes short.
+                        cost = max(float(est.get("first_run_cost") or 0),
+                                   float(est.get("one_clip_cost") or 0))
+                        with SPEND_LOCK:
+                            if SPEND["total"] + cost > SPEND_CAP_USD + 1e-9:
+                                return self._json({
+                                    "error": "the session spending cap is "
+                                             "reached: $%.2f of $%.2f is used, "
+                                             "and this job would cost about "
+                                             "$%.2f. Ask the user to raise it."
+                                             % (SPEND["total"], SPEND_CAP_USD,
+                                                cost),
+                                    "needs_approval": True,
+                                    "spend": _spend_report(),
+                                }, 400)
+                            # What this job may spend before it is stopped:
+                            # everything the cap had left when it started.
+                            budget = round(SPEND_CAP_USD - SPEND["total"], 4)
+                            SPEND["total"] = round(SPEND["total"] + cost, 4)
+                            entry = {
+                                "path": _b.get("path"),
+                                "engine": _b.get("cloud_engine") or "",
+                                "cost": cost, "at": time.time(),
+                                "settled": False}
+                            SPEND["jobs"].append(entry)
+                            _save_spend(SPEND)
+                        _b["_cap_entry"] = entry
+                        _b["_cap_booked"] = cost
+                        _b["_cap_budget"] = budget
                         _b["rent_approved"] = True
                         _b["rent_estimate"] = est
                         ok = True
@@ -750,8 +843,16 @@ class Handler(BaseHTTPRequestHandler):
                         _b["rent_approved"] = True
                         _b["rent_estimate"] = APPROVALS[
                             _b["rent_approval"]]["estimate"]
-            except Exception:
-                pass
+            except Exception as e:
+                # The gate fails CLOSED. It used to swallow its own errors
+                # and carry on, and the job then took "rent_approved" from
+                # the request - so "rent_approval": [1] (unhashable, the
+                # lookup raises) rented a card with no approval at all.
+                _b.pop("rent_approved", None)
+                return self._json({
+                    "error": "the approval could not be checked (%s), so "
+                             "nothing was rented" % str(e)[:120],
+                    "needs_approval": True}, 400)
             body = self._json_body()
             src = body.get("path") or ""
             if not src or not os.path.isfile(src) or not allowed_path(src):
@@ -852,6 +953,13 @@ class Handler(BaseHTTPRequestHandler):
                 "rent_image": body.get("rent_image") or "",
                 "rent_region": body.get("rent_region") or "",
             }, job_work)
+            if body.get("_cap_entry") is not None:
+                # A job let through by the session cap: it may not spend
+                # past what the cap had left, and its booking is settled on
+                # what the card actually cost.
+                job.budget_usd = float(body.get("_cap_budget") or 0)
+                job.on_rental_done = _settle_spend(body["_cap_entry"],
+                                                   float(body.get("_cap_booked") or 0))
             JOBS[job_id] = job
             job.start()
             return self._json({"id": job_id})
@@ -882,8 +990,14 @@ class Handler(BaseHTTPRequestHandler):
             # The user says yes (or no) to a price. This is the only way
             # a rental ever starts.
             try:
+                if not secrets.compare_digest(
+                        self.headers.get("X-Approve-Token") or "", APPROVE_TOKEN):
+                    return self._json({
+                        "error": "only the user can approve a price - in the "
+                                 "GUI at http://127.0.0.1:%d/"
+                                 % self.server.server_address[1]}, 403)
                 body = self._json_body()
-                a = APPROVALS.get(body.get("id") or "")
+                a = APPROVALS.get(str(body.get("id") or ""))
                 if not a:
                     return self._json({"error": "there is no such approval"},
                                        404)
@@ -909,6 +1023,13 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(full)[0] or "text/plain"
         with open(full, "rb") as fh:
             body = fh.read()
+        if name == "index.html":
+            # The page is where the user says yes, so the page is what
+            # carries the approval token.
+            body = body.replace(
+                b"</head>",
+                b'<meta name="approve-token" content="'
+                + APPROVE_TOKEN.encode() + b'">\n</head>', 1)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))

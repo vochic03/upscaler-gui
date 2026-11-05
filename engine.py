@@ -120,7 +120,13 @@ LOOKS = {
         "grain_mode": "perlin",
         "grain_tscale": 0.08,
         "halation": 0.05,
-        "contrast": 0.02,
+        # The grade is a curve on the luma alone (see grade_filters): a
+        # touch of gamma to give the midtones back, a toe that keeps the
+        # shadows off the floor, and the white pinned where it is. It used
+        # to be eq=contrast=1.02, which pivots on mid-grey: on this dark
+        # material (median 41 of 255) that took the median down six levels
+        # and closed the hair and the faces up into black.
+        "gamma": 1.04,
         "saturation": 0.04,
         "black_lift": 0.01,
     },
@@ -145,7 +151,7 @@ LOOKS = {
         "grain_mode": "perlin",
         "grain_tscale": 0.08,
         "halation": 0.07,
-        "contrast": 0.03,
+        "gamma": 1.04,
         "saturation": 0.05,
         "chroma_soft": True,     # coarser, softer chroma
         "black_lift": 0.012,     # the shadows never reach zero
@@ -160,7 +166,7 @@ LOOKS = {
         "grain_mode": "perlin",
         "grain_tscale": 0.08,
         "halation": 0.07,
-        "contrast": 0.02,
+        "gamma": 1.04,
         "saturation": 0.03,
         "chroma_soft": True,     # coarser, softer chroma
         "black_lift": 0.016,     # the shadows never reach zero
@@ -192,10 +198,12 @@ PRESETS = [
                 "frame, so it stays put instead of shimmering. The source "
                 "is de-noised first (the compression goes before the "
                 "diffusion, not after it), the result is sharpened with "
-                "CAS, and a little grain and glow give it depth. A "
-                "72-second 1080p film is about 1.7 hours and $1.60 on a "
-                "card, and the result is 1080p - the same size as the "
-                "source, with the detail put back.",
+                "CAS, and a little grain and glow give it depth. Measured "
+                "on an L40S: 66 s of card time per 2 s of film at "
+                "1440x1080, so a 72-second film is about 40 minutes and "
+                "$0.80 with the start-up - the estimate before the job "
+                "gives the exact figure. The result is 1080p, with the "
+                "detail put back.",
         "backend": "cloud",
         "cloud_engine": "seedvr2",
         "rent": True,
@@ -498,12 +506,56 @@ def video_info(path):
         "vcodec": v.get("codec_name") or "?",
         "acodec": (a or {}).get("codec_name"),
         "pix_fmt": v.get("pix_fmt") or "",
+        # The de-interlace "auto" mode reads this. It was never filled in,
+        # so "auto" could never fire and an interlaced DVD capture went to
+        # the AI with its combing in it, unless "on" was chosen by hand.
+        "field_order": v.get("field_order") or "",
         "bit_rate": int(info.get("format", {}).get("bit_rate") or 0),
     }
 
 
 def even(n):
     return max(2, int(n) // 2 * 2)
+
+
+def grade_filters(look):
+    """The grade of a look, as ffmpeg filters that stay in YUV.
+
+    The tone curve works on the luma alone, in limited range: with x the
+    luma between black (16) and white (235) as 0..1,
+
+        out = lift + (1 - lift) * x ** (1 / gamma)
+
+    so the white stays where it is, the black is raised to `lift` (the
+    shadows of an analogue transfer never reach zero), and a gamma above 1
+    opens the midtones and the shadows without moving either end.
+
+    What this replaces, and why, measured on 100 frames of the SeedVR2
+    output (Y code values; the source is untagged, i.e. limited range):
+
+      * eq=contrast=1.02 pivots on 128. The picture is dark - median 41 -
+        so everything that matters went DOWN: the median by 3 levels on
+        its own, and with the rest of the chain by 6 (41 -> 35).
+      * colorlevels=rimin=0.01 was meant as a black lift, but rimin is the
+        INPUT black point: it pulls the shadows down (p5 18 -> 16), not up.
+        It also only works in RGB, so ffmpeg converted every frame to RGB
+        and back, which clips the saturated stage lights (p95 158 -> 155).
+
+    Saturation is applied to the chroma planes only (eq with contrast 1
+    leaves the luma alone). A look can still name "contrast"; it is
+    honoured, but no built-in look uses it any more.
+    """
+    out = []
+    gamma = float(look.get("gamma") or 1.0)
+    lift = float(look.get("black_lift") or 0)
+    if gamma != 1.0 or lift:
+        out.append("lutyuv=y='16+219*(%s+(1-%s)*pow(clip((val-16)/219\\,0\\,1)\\,1/%s))'"
+                   % (repr(lift), repr(lift), repr(gamma)))
+    contrast = float(look.get("contrast") or 0)
+    saturation = float(look.get("saturation") or 0)
+    if contrast or saturation:
+        out.append(f"eq=contrast={1 + contrast}:saturation={1 + saturation}")
+    return out
 
 
 class Job:
@@ -528,6 +580,14 @@ class Job:
         self._cancel = False
         self._thread = None
         self._proc = None
+        # The card this job has rented, while it has one, and the money
+        # this job may spend (set by the server when a session cap is on).
+        self._rented = None
+        self.budget_usd = None
+        self.rental_cost = 0.0
+        # Called with the cost of the card once it is given back, so the
+        # session ledger is settled on what was spent, not on the estimate.
+        self.on_rental_done = None
         self._lock = threading.Lock()
 
     # --- helpers -----------------------------------------------------------
@@ -547,6 +607,27 @@ class Job:
         if secret and len(secret) > 6:
             return str(text).replace(secret, "[redacted]")
         return text
+
+    def _should_stop(self):
+        """Why the rented work must stop now, or None to carry on.
+
+        The cloud loops call this between pieces and between polls. Stop
+        used to do nothing on a rented job: it set a flag nobody on the
+        cloud path read, so the card kept working - and billing - until the
+        whole job was done.
+        """
+        if self._cancel:
+            return "cancelled"
+        if self.budget_usd is not None and self._rented is not None:
+            try:
+                spent = self._rented.cost_so_far()
+            except Exception:
+                spent = 0.0
+            if spent > self.budget_usd:
+                return (f"stopped: this card has cost about ${spent:.2f}, past "
+                        f"the ${self.budget_usd:.2f} the session cap left for "
+                        f"this job. Ask the user before spending more.")
+        return None
 
     def cancel(self):
         self._cancel = True
@@ -577,6 +658,15 @@ class Job:
             self.say("ERROR: " + str(e))
         finally:
             self._cleanup()
+            # A job that never rented a card (it failed or was refused
+            # before the pod was created) still has its booking settled -
+            # at nothing - so the ledger does not keep money it never spent.
+            if self.on_rental_done and not getattr(self, "_settled", False):
+                self._settled = True
+                try:
+                    self.on_rental_done(self.rental_cost)
+                except Exception:
+                    pass
 
     def _cleanup(self):
         for d in (os.path.join(self.work, "in"), os.path.join(self.work, "out")):
@@ -742,6 +832,24 @@ class Job:
             self.say(f"the diffusion works from a {pre_w}x{pre_h} canvas, "
                      f"its {scale}x makes {pre_w*scale}x{pre_h*scale}, and "
                      f"the finishing scales that to {dtarget[0]}x{dtarget[1]}")
+        elif engine == "seedvr2":
+            # SeedVR2 restores to a resolution (--resolution, the short
+            # side); it is not an N-times enlargement. So the guide must not
+            # be cut down by a "native scale" - that used to run here with
+            # the default model's 2x (or 4x), and a 1080p source capped at
+            # 1080p went up as 960x540: three quarters of a real picture
+            # thrown away for the model to invent back.
+            #
+            # The guide is the source as it is. It only comes down if it is
+            # bigger than the target, and it is never blown up here: an
+            # upscale adds no information, only upload bytes through a proxy
+            # that gives a request about a hundred seconds.
+            scale = 1
+            pre_w, pre_h = guide_for_restore(src_info["width"], src_info["height"], target)
+            if (pre_w, pre_h) != (even(src_info["width"]), even(src_info["height"])):
+                extra.append(f"scale={pre_w}:{pre_h}:flags=lanczos")
+            self.say(f"the guide is {pre_w}x{pre_h}: SeedVR2 restores to the "
+                     f"target, so the guide keeps all the detail the source has")
         else:
             scale = native_scale_for(model)
             if target:
@@ -852,6 +960,7 @@ class Job:
                          + ("" if estimate.get("measured", True)
                             else " - that number is a guess, the engine has "
                                  "never been measured on a card"))
+            self._rented = rented
             rented.create()
             endpoint = rented.wait_ready()
             # The image has the last word on what it can do. The check above
@@ -880,6 +989,7 @@ class Job:
                 # job id, and the pieces come back one at a time.
                 cloud.dloral_run(endpoint, upload, ai, scale=scale,
                                  api_key=opts.get("cloud_key") or None,
+                                 should_stop=self._should_stop,
                                  log=lambda m: self.say(m))
             elif engine == "star":
                 # STAR: the steerable diffusion. Same shape - a job id and
@@ -891,21 +1001,57 @@ class Job:
                                chunk_len=int(opts.get("star_chunk_len") or 24),
                                width=int(opts.get("star_width") or 320),
                                api_key=opts.get("cloud_key") or None,
+                               should_stop=self._should_stop,
                                log=lambda m: self.say(m))
             else:
+                resume_dir = resume_dir_for(
+                    self.work, self.src, engine=engine, model=model, scale=scale,
+                    resolution=(target[1] if target else SEEDVR2_DEFAULT_SHORT),
+                    prompt=opts.get("prompt") or "",
+                    # everything that shapes the upload
+                    prep=extra, look_denoise=look.get("denoise") or "",
+                    denoise_engine=denoise_engine, motion=motion,
+                    bilateral=[opts.get("bilateral_radius"),
+                               opts.get("bilateral_strength")],
+                    chunk=cloud.CHUNK_FRAMES)
                 cloud.upscale_chunked(endpoint, upload, ai, scale=scale, model=model,
+                                      parts_dir=resume_dir,
                                       api_key=opts.get("cloud_key") or None,
                                       engine=engine,
                                       resolution=(target[1] if target
                                                    else SEEDVR2_DEFAULT_SHORT),
                                       prompt=opts.get("prompt") or None,
+                                      should_stop=self._should_stop,
                                       log=lambda m: self.say(m))
         finally:
             # Give the card back whatever happened. An orphaned pod keeps
             # billing by the hour.
             if rented is not None:
                 self.stage = "returning the GPU"
-                rented.destroy()
+                try:
+                    rented.destroy()
+                finally:
+                    try:
+                        self.rental_cost = rented.cost_so_far()
+                    except Exception:
+                        self.rental_cost = 0.0
+                    self.say(f"the card cost about ${self.rental_cost:.2f} "
+                             f"(by this machine's clock)")
+                    self._rented = None
+                    if self.on_rental_done:
+                        self._settled = True
+                        try:
+                            self.on_rental_done(self.rental_cost)
+                        except Exception:
+                            pass
+
+        # The pieces have been joined into ai.mp4, so the resume folder has
+        # done its job; a film's worth of pieces is gigabytes.
+        if engine not in ("dloral", "star"):
+            try:
+                shutil.rmtree(resume_dir, ignore_errors=True)
+            except Exception:
+                pass
 
         # 3. the finishing, here.
         self.stage = "finishing on this Mac"
@@ -1066,19 +1212,21 @@ class Job:
             blend = float(override)
         soften = float(look["soften"])
         grain = int(look["grain"])
-        contrast = float(look["contrast"])
-        saturation = float(look["saturation"])
+        contrast = float(look.get("contrast") or 0)
+        saturation = float(look.get("saturation") or 0)
         cas = float(look.get("cas") or 0)
         halation = float(look.get("halation") or 0)
         # A small tscale is the slow one: the pattern then holds for a
         # second or two and drifts, the way emulsion does.
-        perlin_grain = look.get("grain_mode") == "perlin" and grain > 0
+        perlin_grain = (look.get("grain_mode") == "perlin" and grain > 0
+                        and ffbin.has_filter("perlin"))
         grain_s = grain * 0.05
         halation_sigma = max(4, min(24, (target[1] if target else ai_h) // 90))
         treat = bool(blend or soften or grain or contrast or saturation
                      or cas or halation
                      or look.get("chroma_shift") or look.get("chroma_soft")
-                     or look.get("black_lift"))
+                     or look.get("black_lift")
+                     or float(look.get("gamma") or 1.0) != 1.0)
 
         if treat:
             # Two upscalers, blended: the AI result over a plain lanczos
@@ -1118,13 +1266,7 @@ class Job:
                 # shimmers badly - the opposite of the calm film look. Static
                 # grain gives the analogue texture without the flicker.
                 filters.append(f"noise=alls={grain}:allf=u")
-            if contrast or saturation:
-                filters.append(f"eq=contrast={1 + contrast}:saturation={1 + saturation}")
-            lift = float(look.get("black_lift") or 0)
-            if lift:
-                # Lift the black point a touch: the shadow detail of an
-                # analogue transfer never reaches zero.
-                filters.append(f"colorlevels=rimin={lift}:gimin={lift}:bimin={lift}")
+            filters.extend(grade_filters(look))
             filters.append("format=yuv420p")
             shift = int(look.get("chroma_shift") or 0)
             if shift:
@@ -1305,6 +1447,10 @@ class Job:
         grain = int(look.get("grain") or 0)
         halation = float(look.get("halation") or 0)
         perlin = look.get("grain_mode") == "perlin" and grain > 0
+        if perlin and not ffbin.has_filter("perlin"):
+            self.say("this ffmpeg has no perlin source (it needs 7.1 or later) - "
+                     "the grain falls back to a static pattern")
+            perlin = False
         if grain or halation:
             try:
                 _post_pass(self, look, grain, halation, perlin)
@@ -1392,7 +1538,8 @@ def _post_pass(self, look, grain, halation, perlin):
                      f"tscale={look.get('grain_tscale') or 0.08}:octaves=2:"
                      f"persistence=0.5:random_mode=seed:random_seed=1",
                      "-t", f"{dur:.3f}", "-pix_fmt", "gray", "-f", "rawvideo",
-                     grain_file], check=True)
+                     grain_file], check=True, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE)
             # The pattern has a mean of its own - about 149 at these
             # settings, not 128 - so it has to be measured and subtracted.
             # Without this the "grain" is a uniform lift of the picture.
@@ -1484,6 +1631,43 @@ def preset_availability(preset, image=None):
 # scale of their own and do not use a Real-ESRGAN model at all, so the
 # scale check against that model does not apply to them.
 DIFFUSION_ENGINES = ("seedvr2", "dloral", "star")
+
+
+def resume_dir_for(job_work, source, **settings):
+    """Where a cloud job keeps its finished pieces, so a retry can use them.
+
+    A retry from the GUI is a NEW job with a new folder, so pieces kept in
+    the job's own folder were never found again - which is why a job that
+    died redid every piece. The folder is named after the source file (its
+    path, size and modification time) and every setting that shapes the
+    upload and the answer, so the next job finds it only when it is asking
+    for the same thing of the same file.
+
+    Not after the upload's bytes: the upload is re-encoded each time and
+    x264's rate control with threads does not give the same bytes twice.
+    The frames are the same, and a seam between an old piece and a new one
+    was measured invisible (84 old + 22 new pieces: a frame difference of
+    10.9 at the join, against a median of 17.1 across the film).
+    """
+    import hashlib
+    st = os.stat(source)
+    ident = {"source": os.path.abspath(source), "size": st.st_size,
+             "mtime": int(st.st_mtime), **settings}
+    key = hashlib.sha256(json.dumps(ident, sort_keys=True, default=str).encode())
+    root = os.path.join(os.path.dirname(os.path.abspath(job_work)), "_resume")
+    return os.path.join(root, key.hexdigest()[:20])
+
+
+def guide_for_restore(src_w, src_h, target=None):
+    """The guide a restoring engine (SeedVR2) is given.
+
+    The source as it is, brought down only when it is bigger than the
+    target - never down to target/N, and never blown up.
+    """
+    if not target:
+        return (even(src_w), even(src_h))
+    k = min(1.0, target[0] / src_w, target[1] / src_h)
+    return (even(max(2, round(src_w * k))), even(max(2, round(src_h * k))))
 
 
 def canvas_for(target, src_w, src_h, scale):

@@ -18,6 +18,7 @@ not rent anything.
     python3 tools/test_cloud_guards.py
 """
 import json
+import shutil
 import os
 import subprocess
 import sys
@@ -37,17 +38,34 @@ def check(name, ok, detail=""):
         FAILED.append(name)
 
 
-def call(path, body=None, method=None, timeout=60):
+def call(path, body=None, method=None, timeout=60, headers=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(GUI + path, data=data,
                                  method=method or ("POST" if body else "GET"))
     req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", "Mozilla/5.0")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read().decode() or "{}")
+
+
+def page_token():
+    """The approval token, from the GUI page - the way the GUI gets it.
+
+    Approving a price is the user's act, and the token is handed out only
+    inside the page the user looks at. This suite plays the user here.
+    """
+    import re
+    req = urllib.request.Request(GUI + "/")
+    req.add_header("User-Agent", "Mozilla/5.0")
+    with urllib.request.urlopen(req, timeout=20) as r:
+        html = r.read().decode("utf-8", "replace")
+    m = re.search(r'name="approve-token" content="([0-9a-f]+)"', html)
+    return m.group(1) if m else ""
 
 
 def pods():
@@ -278,9 +296,34 @@ def main():
     aid = est.get("approval_id")
     check("an estimate comes with an approval to give", bool(aid),
           json.dumps(est)[:120])
-    _, ap = call("/api/approve", {"id": aid, "yes": True})
+    st_noauth, ap_noauth = call("/api/approve", {"id": aid, "yes": True})
+    check("an approval without the page's token is refused",
+          st_noauth == 403 and ap_noauth.get("state") != "approved",
+          json.dumps(ap_noauth)[:120])
+    _, ap = call("/api/approve", {"id": aid, "yes": True},
+                 headers={"X-Approve-Token": page_token()})
     check("the user can approve the price", ap.get("state") == "approved",
           json.dumps(ap)[:120])
+
+    # A request that names its own approval cannot rent. "rent_approval"
+    # as a list used to make the gate raise, the gate swallowed it, and the
+    # job took "rent_approved": true from the request. The path is one the
+    # server refuses (403) AFTER the gate, so even a broken gate rents
+    # nothing here; a working one answers 400 before it gets that far.
+    st_by, by = call("/api/run", {
+        "path": "/nonexistent/clip.mp4", "backend": "cloud",
+        "cloud_engine": "seedvr2", "rent": True, "rent_approval": [1],
+        "rent_approved": True, "rent_estimate": {"gpu": "x"}})
+    check("a job cannot approve itself by malforming the approval",
+          st_by == 400 and not by.get("id"), f"{st_by} {json.dumps(by)[:100]}")
+
+    # A web page in the user's browser must not be able to drive this
+    # server: a cross-site POST carries its own Origin, and a rebound DNS
+    # name carries its own Host.
+    st_o, _ = call("/api/estimate", {"path": src}, headers={"Origin": "http://evil.example"})
+    check("a request from another site is refused", st_o == 403, str(st_o))
+    st_h, _ = call("/api/spend", headers={"Host": "evil.example:8790"})
+    check("a request for another host name is refused", st_h == 403, str(st_h))
     status, job = call("/api/run", {
         "path": src, "backend": "cloud", "cloud_engine": "dloral", "model": "",
         "scale": 4, "look": "polished", "denoise_engine": "bilateral",
@@ -432,6 +475,178 @@ def main():
         check("the card lifecycle keeps the weights when it can", False,
               str(e)[:140])
 
+    # 3c4. a DELETE that answers 200 is not proof. Runpod has left a pod
+    #       running and billing after one, so the pod is looked up again,
+    #       the DELETE repeated, and a pod that will not go is kept in the
+    #       pod file for the next start to sweep.
+    try:
+        import rental
+        import tempfile as _tf
+        old_state = rental.POD_STATE
+        rental.POD_STATE = os.path.join(_tf.mkdtemp(prefix="pods-"), "pods.json")
+        try:
+            seen = []
+            gets = {"n": 0}
+
+            class Stubborn(rental.RunPod):
+                def _request(self, method, path, body=None):
+                    seen.append(method)
+                    if method == "GET":
+                        gets["n"] += 1
+                        if gets["n"] < 3:
+                            return {"id": "p1", "status": "RUNNING"}
+                        raise rental.RentalError("Runpod said 404: not found")
+                    return {}
+
+            p = Stubborn("k", log=lambda m: None)
+            p.pod_id = "p1"
+            rental.remember_pod("p1")
+            gone = p.terminate(verify_tries=5, verify_wait=0)
+            check("a pod still there after its DELETE is deleted again",
+                  gone and seen.count("DELETE") == 3, str(seen))
+            check("a pod that is really gone leaves the pod file",
+                  "p1" not in rental._read_pod_state())
+
+            class Immortal(rental.RunPod):
+                def _request(self, method, path, body=None):
+                    return {"id": "p2", "status": "RUNNING"} if method == "GET" else {}
+
+            q = Immortal("k", log=lambda m: None)
+            q.pod_id = "p2"
+            rental.remember_pod("p2")
+            check("a pod that will not go is reported, not forgotten",
+                  q.terminate(verify_tries=2, verify_wait=0) is False
+                  and "p2" in rental._read_pod_state())
+        finally:
+            rental.POD_STATE = old_state
+
+        r = rental.RunPod("k", log=lambda m: None)
+        r.cost_per_hour = 1.0
+        r.billing_since = time.time() - 3600
+        check("a rental knows what it has cost so far",
+              1.0 <= r.cost_so_far() <= 1.02, f"${r.cost_so_far():.4f}")
+    except Exception as e:
+        check("the termination is verified", False, str(e)[:140])
+
+    # 3c5. Stop has to stop a rented job, and so does the session budget.
+    #       Stop used to set a flag nothing on the cloud path read: the card
+    #       kept working, and billing, until the whole job was done.
+    try:
+        import cloud as cloud_mod
+        import engine as engine_mod
+        tmp5 = tempfile.mkdtemp(prefix="stop-")
+        clip = os.path.join(tmp5, "clip.mp4")
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                        "testsrc=size=64x48:rate=25", "-frames:v", "120",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", clip],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        sent = []
+        real_upscale = cloud_mod.upscale
+        cloud_mod.upscale = lambda *a, **k: sent.append(1)
+        try:
+            cloud_mod.upscale_chunked("http://127.0.0.1:9", clip,
+                                      os.path.join(tmp5, "ai.mp4"),
+                                      chunk_frames=50, log=lambda m: None,
+                                      should_stop=lambda: "cancelled")
+            check("Stop stops a rented job before the next piece", False,
+                  "it carried on")
+        except RuntimeError as e:
+            check("Stop stops a rented job before the next piece",
+                  "cancelled" in str(e) and not sent, f"{len(sent)} pieces sent")
+        finally:
+            cloud_mod.upscale = real_upscale
+
+        # The resume: a second run that asks for the same thing pays only
+        # for the pieces the first one did not finish.
+        sent2 = []
+
+        def _fake(endpoint, part, answer, **k):
+            sent2.append(part)
+            shutil.copy(part, answer)
+        cloud_mod.upscale = _fake
+        try:
+            rdir = os.path.join(tmp5, "resume")
+            cloud_mod.upscale_chunked("http://127.0.0.1:9", clip,
+                                      os.path.join(tmp5, "ai1.mp4"), chunk_frames=50,
+                                      log=lambda m: None, parts_dir=rdir)
+            first = len(sent2)
+            os.remove(os.path.join(rdir, "answer-0000050.mp4"))
+            with open(os.path.join(rdir, "answer-0000100.mp4"), "wb") as fh:
+                fh.write(b"half a file")         # a piece that died mid-write
+            cloud_mod.upscale_chunked("http://127.0.0.1:9", clip,
+                                      os.path.join(tmp5, "ai2.mp4"), chunk_frames=50,
+                                      log=lambda m: None, parts_dir=rdir)
+            check("a retry redoes only the pieces that are missing or broken",
+                  first == 3 and len(sent2) - first == 2,
+                  f"first run {first} pieces, retry {len(sent2) - first}")
+            n2, _, _, _ = cloud_mod.probe_video(os.path.join(tmp5, "ai2.mp4"))
+            check("the resumed film has every frame", n2 == 120, str(n2))
+            a = engine_mod.resume_dir_for(tmp5, clip, engine="seedvr2", resolution=1080)
+            b = engine_mod.resume_dir_for(tmp5, clip, engine="seedvr2", resolution=720)
+            check("a retry with other settings does not reuse the pieces", a != b)
+        finally:
+            cloud_mod.upscale = real_upscale
+
+        class _Card:
+            def cost_so_far(self):
+                return 1.0
+        j = engine_mod.Job("t", clip, os.path.join(tmp5, "o.mp4"), {}, tmp5)
+        j._rented = _Card()
+        j.budget_usd = 0.5
+        why = j._should_stop() or ""
+        check("a job that has spent its budget is stopped", "cap" in why, why[:100])
+        j.budget_usd = 5.0
+        check("a job inside its budget carries on", j._should_stop() is None)
+        j.cancel()
+        check("a cancelled job is stopped", j._should_stop() == "cancelled")
+    except Exception as e:
+        check("the rented job can be stopped", False, str(e)[:140])
+
+    # 3c7. de-interlace "auto" has to be able to fire: it reads the field
+    #       order, and video_info never used to report one.
+    try:
+        ilace = os.path.join(tempfile.mkdtemp(prefix="ilace-"), "i.mp4")
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                        "testsrc=size=128x96:rate=25", "-frames:v", "10",
+                        "-vf", "setfield=tff", "-c:v", "libx264",
+                        "-flags", "+ildct+ilme", "-x264opts", "tff=1",
+                        "-pix_fmt", "yuv420p", ilace],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        fo = engine_mod.video_info(ilace).get("field_order")
+        check("an interlaced source is seen as interlaced",
+              fo in ("tt", "bb", "tb", "bt"), repr(fo))
+    except Exception as e:
+        check("an interlaced source is seen as interlaced", False, str(e)[:140])
+
+    # 3c6. the ledger is settled on what the card cost, not on the guess.
+    #       (A scratch ledger: the real one is never touched by the suite.)
+    try:
+        # By its path: the worker's own server.py shares the name.
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "upscaler_gui_server",
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "server.py"))
+        server_mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(server_mod)
+        old_file, old_spend = server_mod.SPEND_FILE, server_mod.SPEND
+        server_mod.SPEND_FILE = os.path.join(tempfile.mkdtemp(prefix="spend-"), "s.json")
+        server_mod.SPEND = {"total": 0.40, "jobs": []}
+        try:
+            entry = {"cost": 0.40, "settled": False}
+            server_mod.SPEND["jobs"].append(entry)
+            settle = server_mod._settle_spend(entry, 0.40)
+            settle(0.65)
+            check("a job that ran over its estimate is booked at what it cost",
+                  abs(server_mod.SPEND["total"] - 0.65) < 1e-6,
+                  f"${server_mod.SPEND['total']:.2f}")
+            settle(0.10)
+            check("a job is settled once", abs(server_mod.SPEND["total"] - 0.65) < 1e-6)
+        finally:
+            server_mod.SPEND_FILE, server_mod.SPEND = old_file, old_spend
+    except Exception as e:
+        check("the ledger is settled", False, str(e)[:140])
+
     # 3c0. the ffmpeg has to RUN. Homebrew replaces ffmpeg and its
     #       libraries one at a time, and in the middle of that swap the
     #       binary on the PATH cannot load its own libraries any more -
@@ -461,8 +676,14 @@ def main():
             check("every card we offer exists in the catalogue", not wrong,
                   ", ".join(wrong))
         else:
-            check("every card we offer exists in the catalogue", True,
+            # Not checked is not the same as fine.
+            print("  skip every card we offer exists in the catalogue - "
                   "the catalogue could not be reached")
+        sv = [c["id"] for c in rental_mod.gpu_choices("seedvr2", api_key="",
+                                                      out_height=1080)]
+        check("a 1080p SeedVR2 job is offered the measured card first, and no A100",
+              sv and sv[0] == "NVIDIA L40S"
+              and not any("A100" in c or "A5000" in c for c in sv), ", ".join(sv))
     except Exception as e:
         check("every card we offer exists in the catalogue", False,
               str(e)[:140])
@@ -650,6 +871,58 @@ def main():
     except Exception as e:
         check("the finishing pass works with the clean look", False, str(e)[:140])
 
+    # 3h. the grained looks have to finish on the ffmpeg that is here. The
+    #      perlin grain source needs ffmpeg 7.1; on 6.1 (Ubuntu, Debian) the
+    #      generator failed silently and the pass died opening a grain file
+    #      that was never made - after the card was paid for.
+    try:
+        for name in ("enhance", "polished"):
+            out = os.path.join(tmp3, f"out-{name}.mp4")
+            cloud_mod.finish_locally(ai, original, out, scale=2,
+                                     look=dict(engine_mod.LOOKS[name]),
+                                     encoder="h264", target=(64, 48),
+                                     log=lambda m: None)
+            check(f"the {name} look finishes on this ffmpeg",
+                  os.path.exists(out) and os.path.getsize(out) > 0,
+                  "perlin" if __import__("ffbin").has_filter("perlin")
+                  else "no perlin here - the static grain stands in")
+    except Exception as e:
+        check("the grained looks finish on this ffmpeg", False, str(e)[:140])
+
+    # 3i. the grade must not make a dark picture heavier. eq=contrast pivots
+    #      on mid-grey, so on this material (median 41) it took the median
+    #      down six levels; colorlevels=rimin was a black CRUSH, not a lift.
+    #      A ramp from black (16) to a dark grey goes through every look's
+    #      grade: the median may not go down and the white must stay white.
+    try:
+        import numpy as np
+        ramp = os.path.join(tmp3, "ramp.mp4")
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                        "nullsrc=size=256x64:rate=25,geq=lum='16+X*219/255':cb=128:cr=128",
+                        "-frames:v", "2", "-c:v", "libx264", "-qp", "0",
+                        "-pix_fmt", "yuv420p", ramp],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+        def luma(vf):
+            raw = subprocess.run(
+                ["ffmpeg", "-v", "error", "-i", ramp, "-frames:v", "1",
+                 "-vf", (vf + "," if vf else "") + "format=yuv420p",
+                 "-f", "rawvideo", "-"], stdout=subprocess.PIPE, check=True).stdout
+            return np.frombuffer(raw, np.uint8)[:256 * 64].reshape(64, 256)[32]
+
+        base = luma("")
+        for name, lk in engine_mod.LOOKS.items():
+            vf = ",".join(engine_mod.grade_filters(lk))
+            got = luma(vf) if vf else base
+            dark = slice(0, 64)          # the bottom quarter: 16 .. ~70
+            check(f"the {name} grade does not darken the shadows",
+                  int(got[dark].astype(int).sum()) >= int(base[dark].astype(int).sum()),
+                  f"mean {base[dark].mean():.1f} -> {got[dark].mean():.1f}")
+            check(f"the {name} grade keeps the white",
+                  int(got[-1]) >= int(base[-1]) - 2, f"{base[-1]} -> {got[-1]}")
+    except Exception as e:
+        check("the grade guard runs", False, str(e)[:140])
+
     # 3e. the local worker: the one that runs on this Mac's GPU. It is a
     #      separate process from the GUI, and if it is not there the local
     #      presets are dead ends.
@@ -685,8 +958,14 @@ def main():
         check("the scratch space is there", os.path.isdir(space_guard.SCRATCH),
               space_guard.SCRATCH)
         check("the guard can see the free space", st["free_bytes"] is not None)
-        check("the iCloud Drive is there for when it is needed",
-              st["ic_cloud"] is not None, str(st["ic_cloud"]))
+        # iCloud Drive only exists on a Mac. Anywhere else (a cloud sandbox,
+        # a Linux box) there is nothing to check, and a FAIL would only
+        # teach the reader to ignore the suite.
+        if sys.platform == "darwin":
+            check("the iCloud Drive is there for when it is needed",
+                  st["ic_cloud"] is not None, str(st["ic_cloud"]))
+        else:
+            print("  skip the iCloud Drive check - this is not a Mac")
         check("the guard does nothing while there is space",
               space_guard.ensure_space(min_free_gib=1) is None)
     except Exception as e:
