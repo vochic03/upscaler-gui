@@ -5,6 +5,12 @@ Everything here was measured on the real material, not guessed.
 > **Status (review, 2026-11-04):** all four have since been acted on - see
 > `REVIEW-NOTES.md` for what changed, what was rejected and why. The text
 > below is kept as it was written.
+>
+> **Update (2026-11-05):** finding 1 was then measured on a card, and the
+> answer is not what anyone expected - the guide resolution barely moves the
+> picture (+0.8% edge energy, -0.9% sharpness); only the brightness moves
+> (+5.1 levels). See `SEEDVR2-AB.md`. The finishing, not the guide, is where
+> the picture comes from.
 
 **Nothing in this file has been changed in the code.** These are deductions
 I did not act on. How the picture should look is not my call - it is the
