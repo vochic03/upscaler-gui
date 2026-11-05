@@ -22,7 +22,7 @@ over.
 - The **last piece of work** was a full 211-second film - *Zvezde Granda -
   Milica Pavlovic* - upscaled end to end with SeedVR2 on a rented L40S,
   finished with the *Enhance* look, and muxed back with its original audio.
-  It cost **$0.53** and it is in the review media.
+  It cost **$2.23** and it is in the review media.
 - **39 guards** hold (`tools/test_cloud_guards.py`). They are the
   regression net for everything below.
 
@@ -64,7 +64,7 @@ Everything below was **measured on a card**, not estimated from a paper.
 | engine | what it is | measured | cost |
 |---|---|---|---|
 | Real-ESRGAN | a faithful enlargement | local, free | - |
-| **SeedVR2** | a 3B diffusion transformer, one step, temporally consistent. **Restores** - it does not enlarge. | 66 s per 50 frames at 1440x1080 on an L40S | ~$0.53 for the 211 s film |
+| **SeedVR2** | a 3B diffusion transformer, one step, temporally consistent. **Restores** - it does not enlarge. | 66 s per 50 frames at 1440x1080 on an L40S | $2.23 for the 211 s film, measured |
 | DLoRAL | SD 2.1 as a video restorer, works from a quarter-size canvas | 10.45 s/frame at 1080p | 10.8 h / **$11.83** at 1080p; 3.5 h / **$3.15** at 720p |
 | STAR | a steerable diffusion: a text prompt, a small clip, a regeneration | 320x180 to 1280x720 in 906 s | ~$0.25 |
 
@@ -241,5 +241,11 @@ Verified at the end of the work:
 
 The rented cards used across this work: the STAR measurement, the DLoRAL
 refit, the DLoRAL 1080p and 720p measurements, the film that died at 80%,
-and the 22 pieces that finished it. Roughly **$2.20** in total, the bulk of
-it the two DLoRAL measurements. The finished film itself was $0.53.
+and the 22 pieces that finished it.
+
+**The film cost $2.23**: 93 minutes of card time at $1.09/h for the first
+84 pieces ($1.70), plus $0.53 for the 22 that finished it. The $0.53 was
+only the last stretch - the figure in an earlier draft of this file was
+wrong, and it is corrected here. The engine measurements on top of that
+were smaller: the DLoRAL numbers in the cost table are what a *whole*
+film would cost, not what the measurements spent.
