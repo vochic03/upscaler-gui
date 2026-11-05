@@ -1,0 +1,16 @@
+# the scratch space: jobs, uploads, outputs
+work
+work/
+# the vendored binaries: 433 MB of somebody else's build
+vendor/
+__pycache__/
+*.pyc
+*.zip
+.DS_Store
+
+# a third-party binary: shaka-packager v3.9.3, shipped with the media release instead
+drm-capture/tools/packager
+
+# the DRM content keys are secrets, and this repository is public
+*.key
+keys/

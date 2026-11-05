@@ -76,6 +76,8 @@ class SRVGGNetCompact(nn.Module):
 import torch
 from torch import nn as nn
 from torch.nn import functional as F
+from torch.nn import init
+from torch.nn.modules.batchnorm import _BatchNorm
 
 # Helpers copied from BasicSR basicsr/archs/arch_util.py (BSD-3-Clause),
 # trimmed to the three the RRDB net needs.

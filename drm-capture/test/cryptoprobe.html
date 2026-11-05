@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>crypto probe</title></head>
+<body><pre id="out"></pre>
+<script type="module">
+import { AES, cbcDecryptBlocks, ctrCryptBlocks } from '../js/aes.js';
+const KEY = '000102030405060708090a0b0c0d0e0f';
+const IV8  = 'bdb6b7903fd86c0b';
+const CT   = '97c650aeb8b05e83833488ed125887630789b9c548f2c213dec824cb554ae03b';
+const EXPECTED = '0142032210838f3cc78025d000101d002b4d83318db5080810c8808118003919';
+
+const h2b = (h) => Uint8Array.from(h.match(/../g).map((x) => parseInt(x, 16)));
+const b2h = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+
+const out = [];
+const say = (s) => {
+  out.push(s);
+  document.getElementById('out').textContent = out.join('\n');
+};
+say('expected: ' + EXPECTED);
+
+async function ctr(counter, length, label) {
+  try {
+    const key = await crypto.subtle.importKey('raw', h2b(KEY), { name: 'AES-CTR' }, false, ['decrypt']);
+    const r = await crypto.subtle.decrypt({ name: 'AES-CTR', counter: counter.buffer, length }, key, h2b(CT).buffer);
+    say(label.padEnd(34) + b2h(new Uint8Array(r)));
+  } catch (e) {
+    say(label.padEnd(34) + 'ERR ' + e.message);
+  }
+}
+
+async function cbc(counter, label) {
+  try {
+    const key = await crypto.subtle.importKey('raw', h2b(KEY), { name: 'AES-CBC' }, false, ['decrypt']);
+    const r = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: counter.buffer }, key, h2b(CT).buffer);
+    say(label.padEnd(34) + b2h(new Uint8Array(r)));
+  } catch (e) {
+    say(label.padEnd(34) + 'ERR ' + e.message);
+  }
+}
+
+const iv8 = h2b(IV8);
+const high = new Uint8Array(16); high.set(iv8, 0);   // IV || zeros
+const low = new Uint8Array(16); low.set(iv8, 8);     // zeros || IV
+
+await ctr(high, 64, 'AES-CTR len=64  counter=IV||0');
+await ctr(high, 128, 'AES-CTR len=128 counter=IV||0');
+await ctr(low, 64, 'AES-CTR len=64  counter=0||IV');
+await ctr(low, 128, 'AES-CTR len=128 counter=0||IV');
+await cbc(high, 'AES-CBC iv=IV||0');
+await cbc(low, 'AES-CBC iv=0||IV');
+
+
+// --- pure-JS AES self test (FIPS-197) ---
+{
+  const aes = new AES(h2b(KEY));
+  const pt = h2b('00112233445566778899aabbccddeeff');
+  const ct = aes.encryptBlock(pt);
+  say('JS AES-128 encrypt'.padEnd(34) + b2h(ct));
+  say('FIPS-197 expected'.padEnd(34) + '69c4e0d86a7b0430d8cdb78070b4c55a');
+  say('JS AES-128 decrypt'.padEnd(34) + b2h(aes.decryptBlock(ct)));
+  // CBC round trip against WebCrypto encryption
+  const wk = await crypto.subtle.importKey('raw', h2b(KEY), { name: 'AES-CBC' }, false, ['encrypt']);
+  const enc = await crypto.subtle.encrypt({ name: 'AES-CBC', iv: h2b(IV8).buffer }, wk, h2b(CT).buffer);
+  say('JS CBC decrypt'.padEnd(34) + b2h(cbcDecryptBlocks(aes, h2b(IV8), new Uint8Array(enc))));
+  say('expected (ffmpeg)'.padEnd(34) + EXPECTED);
+  // CTR via JS
+  say('JS CTR decrypt'.padEnd(34) + b2h(ctrCryptBlocks(aes, h2b(IV8), h2b(CT))));
+}
+
+document.title = 'DONE';
+</script>
+</body></html>

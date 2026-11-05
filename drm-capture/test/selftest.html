@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>selftest</title>
+<style>
+  body { background:#0f1115; color:#e6e9ef; font:12px ui-monospace, Menlo, monospace; padding:16px; }
+  pre { white-space:pre-wrap; }
+  video { width:480px; background:#000; margin-top:12px; }
+</style>
+</head>
+<body>
+<pre id="log">selftest starting…</pre>
+<video id="video" muted playsinline></video>
+
+<script type="module">
+import { Pipeline } from '../js/pipeline.js';
+
+const params = new URLSearchParams(location.search);
+const manifest = params.get('manifest');
+const key = params.get('key') || '';
+const tag = params.get('tag') || 'test';
+const headers = {};
+for (const h of (params.get('headers') || '').split('|')) {
+  const i = h.indexOf(':');
+  if (i > 0) headers[h.slice(0, i).trim()] = h.slice(i + 1).trim();
+}
+
+const logEl = document.getElementById('log');
+const log = (m) => {
+  logEl.textContent += m + '\n';
+  console.log('[selftest]', m);
+};
+
+function toBase64(bytes) {
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+async function dump(name, bytes) {
+  const res = await fetch('/dump', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `${tag}-${name}`, data: toBase64(bytes) }),
+  });
+  const j = await res.json().catch(() => ({}));
+  log(`dumped ${tag}-${name} (${j.bytes || 0} bytes)`);
+}
+
+(async () => {
+  try {
+    const pipe = new Pipeline(document.getElementById('video'), { log, dump });
+    await pipe.load(manifest, { headers, keyHex: key });
+    await pipe.feed();
+    document.title = 'DONE';
+    log('DONE');
+  } catch (e) {
+    document.title = 'ERROR';
+    log('ERROR: ' + e.message);
+    log(e.stack || '');
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>cbc probe 2</title></head>
+<body><pre id="out"></pre>
+<script type="module">
+const h2b = (h) => Uint8Array.from(h.match(/../g).map((x) => parseInt(x, 16)));
+const b2h = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+const out = [];
+const say = (s) => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
+
+const raw = h2b('000102030405060708090a0b0c0d0e0f');
+const iv = h2b('000102030405060708090a0b0c0d0e0f');
+const data = h2b('00112233445566778899aabbccddeeff');
+
+async function t(label, fn) {
+  try { const r = await fn(); say(label.padEnd(48) + 'OK ' + (r ? b2h(new Uint8Array(r)) : '')); }
+  catch (e) { say(label.padEnd(48) + 'ERR name=' + e.name + ' msg=' + JSON.stringify(e.message)); }
+}
+
+await t('decrypt, usages=[encrypt,decrypt]', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['encrypt', 'decrypt']);
+  return crypto.subtle.decrypt({ name: 'AES-CBC', iv: iv.buffer }, k, data.buffer);
+});
+await t('decrypt, data as Uint8Array', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['decrypt']);
+  return crypto.subtle.decrypt({ name: 'AES-CBC', iv: iv.buffer }, k, data);
+});
+await t('decrypt, fresh ArrayBuffer iv', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['decrypt']);
+  const b = new ArrayBuffer(16); new Uint8Array(b).set(iv);
+  return crypto.subtle.decrypt({ name: 'AES-CBC', iv: b }, k, data.buffer);
+});
+await t('decrypt AES-256-CBC', async () => {
+  const k = await crypto.subtle.importKey('raw', new Uint8Array(32), { name: 'AES-CBC' }, false, ['decrypt']);
+  return crypto.subtle.decrypt({ name: 'AES-CBC', iv: iv.buffer }, k, data.buffer);
+});
+await t('deriveKey AES-CBC then decrypt', async () => {
+  const base = await crypto.subtle.importKey('raw', raw, 'AES-CBC', false, ['deriveKey']);
+  const k = await crypto.subtle.deriveKey({ name: 'AES-CBC', length: 128 }, base, { name: 'AES-CBC', length: 128 }, false, ['decrypt']);
+  return crypto.subtle.decrypt({ name: 'AES-CBC', iv: iv.buffer }, k, data.buffer);
+});
+await t('encrypt AES-CTR (control)', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CTR' }, false, ['encrypt']);
+  return crypto.subtle.encrypt({ name: 'AES-CTR', counter: iv.buffer, length: 64 }, k, data.buffer);
+});
+await t('decrypt AES-CBC via encrypt-inverse?', async () => {
+  // sanity: does encrypt work for the same key/iv/data?
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['encrypt']);
+  return crypto.subtle.encrypt({ name: 'AES-CBC', iv: iv.buffer }, k, data.buffer);
+});
+
+document.title = 'DONE';
+</script>
+</body></html>

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>record test</title>
+<style>
+  body { background:#0f1115; color:#e6e9ef; font:12px ui-monospace, Menlo, monospace; padding:16px; }
+  pre { white-space:pre-wrap; }
+  video { width:480px; background:#000; margin-top:12px; }
+</style>
+</head>
+<body>
+<pre id="log">record test starting…</pre>
+<video id="video" playsinline></video>
+<button id="go">Start recording test</button>
+
+<script type="module">
+import { Pipeline } from '../js/pipeline.js';
+
+const params = new URLSearchParams(location.search);
+const manifest = params.get('manifest');
+const key = params.get('key') || '';
+const tag = params.get('tag') || 'rec';
+const seconds = Number(params.get('seconds') || '4');
+
+const logEl = document.getElementById('log');
+const log = (m) => { logEl.textContent += m + '\n'; console.log('[rec]', m); };
+
+function toBase64(bytes) {
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+async function run() {
+  try {
+    const video = document.getElementById('video');
+    const pipe = new Pipeline(video, { log });
+    await pipe.load(manifest, { headers: {}, keyHex: key });
+    await pipe.feed();
+
+    await new Promise((r) => {
+      if (video.readyState >= 1) r();
+      else video.addEventListener('loadedmetadata', r, { once: true });
+    });
+    log(`metadata: ${video.videoWidth}x${video.videoHeight} duration=${video.duration}`);
+
+    await video.play();
+    log(`playing, currentTime=${video.currentTime}`);
+
+    // Let a few frames render before capturing.
+    await new Promise((r) => setTimeout(r, 600));
+
+    const rec = pipe.player.startRecording();
+    log('recorder started');
+
+    await new Promise((r) => setTimeout(r, seconds * 1000));
+
+    const blob = await pipe.player.stopRecording();
+    log(`recording stopped: ${blob.size} bytes (${blob.type})`);
+
+    const res = await fetch('/dump', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: `${tag}.webm`, data: toBase64(new Uint8Array(await blob.arrayBuffer())) }),
+    });
+    const j = await res.json().catch(() => ({}));
+    log(`dumped ${tag}.webm: ${j.bytes || 0} bytes`);
+
+    log(`final currentTime=${video.currentTime}`);
+    document.title = 'DONE';
+  } catch (e) {
+    document.title = 'ERROR';
+    log('ERROR: ' + (e && e.message));
+    log(e && e.stack);
+  }
+}
+
+// The AudioContext needs a real user gesture, so start from a click.
+document.getElementById('go').addEventListener('click', () => {
+  log('clicked');
+  run();
+}, { once: true });
+</script>
+</body>
+</html>
