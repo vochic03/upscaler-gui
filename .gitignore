@@ -10,3 +10,7 @@ __pycache__/
 
 # a third-party binary: shaka-packager v3.9.3, shipped with the media release instead
 drm-capture/tools/packager
+
+# the DRM content keys are secrets, and this repository is public
+*.key
+keys/
