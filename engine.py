@@ -126,7 +126,7 @@ LOOKS = {
         # to be eq=contrast=1.02, which pivots on mid-grey: on this dark
         # material (median 41 of 255) that took the median down six levels
         # and closed the hair and the faces up into black.
-        "gamma": 1.04,
+        "gamma": 1.08,
         "saturation": 0.04,
         "black_lift": 0.01,
     },
