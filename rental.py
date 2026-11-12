@@ -194,6 +194,23 @@ GPU_CHOICES = {
         {"id": "NVIDIA A100 80GB PCIe", "label": "A100 80 GB — $1.19/h", "vram": 80},
         {"id": "NVIDIA H100 PCIe", "label": "H100 80 GB — $2.90/h", "vram": 80},
     ],
+    # SeedVR2 has a list of its own. It used to fall through to the
+    # Real-ESRGAN list, which is how the A100 came to be offered for it.
+    #
+    # The A100 is left out on price and on evidence, not on FP8: the
+    # SeedVR2 code keeps FP8 weights as storage and does the arithmetic in
+    # BF16, so an Ampere card can run them (the "it cannot use FP8" reason
+    # in FINDINGS 3 does not hold). But the model was measured on an L40S
+    # (66 s per 50 frames at 1440x1080) and never on an A100, and the A100
+    # is about 64% dearer an hour; it would have to be that much faster to
+    # break even. The A5000 is out for the same reason and for its memory.
+    # The 4090 stays for results of 720p and below (vram_for filters it out
+    # above that); the H100 is the fallback when no L40S is to be had.
+    "seedvr2": [
+        {"id": "NVIDIA GeForce RTX 4090", "label": "RTX 4090 24 GB — $0.89/h", "vram": 24},
+        {"id": "NVIDIA L40S", "label": "L40S 48 GB — $1.09/h", "vram": 48},
+        {"id": "NVIDIA H100 PCIe", "label": "H100 80 GB — $2.90/h", "vram": 80},
+    ],
     # STAR wants about 39 GB of VRAM for its own small example, so the
     # 24 GB cards are not on the list.
     "star": [
@@ -472,6 +489,16 @@ DIFFUSION_MODELS = {
     "dloral": {"fixed": 0.114, "out": 3.753, "out_pow": 1.427, "in": 0.0},
 }
 
+# The GUI sends SeedVR2 its film in 50-frame pieces (the proxy's hundred
+# seconds), and every piece pays a round trip on top of the model: the
+# upload, the answer coming back, the model loading its batch. Measured on
+# the film: 66 s of wall clock per 50-frame piece on an L40S, against 58 s
+# that the model above predicts for those frames - so about 8 s a piece.
+# One measurement; it is here because without it a 20 s sample was quoted
+# 13% under what it cost.
+PIECE_OVERHEAD_SECONDS = {"seedvr2": 8.0}
+PIECE_FRAMES = 50
+
 # The engines that have been measured on a card. The UI says so, next to
 # the price.
 MEASURED_FPS = {
@@ -608,6 +635,12 @@ class RunPod:
         self.pod_id = None
         self.endpoint = None
         self.cost_per_hour = None
+        # When the card started billing and when it stopped, by this
+        # machine's clock. The session spending cap is settled against
+        # these, not against the estimate: an estimate is a guess, and a
+        # cap that only ever sees guesses is not a cap.
+        self.billing_since = None
+        self.billing_until = None
         # True while a stopped card is being woken up: it stays EXITED
         # until it has booted, and that is not a failure.
         self.starting = False
@@ -702,6 +735,9 @@ class RunPod:
                              + dmodel["out"] * out_mpx ** dmodel.get("out_pow", 1.0)
                              + dmodel["in"] * in_mpx)
                 ai_seconds = frames * per_frame if frames else 0.0
+                if frames and engine in PIECE_OVERHEAD_SECONDS:
+                    pieces = -(-int(frames) // PIECE_FRAMES)
+                    ai_seconds += pieces * PIECE_OVERHEAD_SECONDS[engine]
                 rate = 1.0 / per_frame if per_frame else 0.0
             else:
                 # a guess, scaled by the output the way the measured one is
@@ -794,6 +830,7 @@ class RunPod:
                      f"({self.pod_id}) - waking it up instead of downloading "
                      f"the weights again")
             self.starting = True
+            self.billing_since = time.time()
             try:
                 self._request("POST", f"/pods/{self.pod_id}/action",
                               {"action": "start"})
@@ -882,6 +919,7 @@ class RunPod:
         self.cost_per_hour = pod.get("cost")
         if not self.pod_id:
             raise RentalError(f"Runpod did not give us a pod: {pod}")
+        self.billing_since = time.time()
         remember_pod(self.pod_id, self.image)
         self.log(f"pod {self.pod_id} "
                  + (f"at ${self.cost_per_hour}/h" if self.cost_per_hour else ""))
@@ -1017,24 +1055,80 @@ class RunPod:
         except Exception as e:
             self.log(f"WARNING: could not stop pod {self.pod_id}: {e}")
         finally:
+            self.billing_until = time.time()
             self.pod_id = None
 
-    def terminate(self):
-        """Throw the card away: the GPU, the disk and everything on it."""
+    def _pod_gone(self, pod_id):
+        """Has Runpod really let this pod go?
+
+        A DELETE can answer 200 and leave the pod running and billing, so
+        the answer to the DELETE is not the answer. The pod list is.
+        """
+        try:
+            pod = self._request("GET", f"/pods/{pod_id}")
+        except RentalError as e:
+            # 404: there is no such pod any more.
+            return " 404" in str(e) or "not found" in str(e).lower()
+        except Exception:
+            return False
+        if not pod or not pod.get("id"):
+            return True
+        return pod.get("status") in ("TERMINATED",) or pod.get("desiredStatus") == "TERMINATED"
+
+    def terminate(self, verify_tries=None, verify_wait=None):
+        """Throw the card away: the GPU, the disk and everything on it.
+
+        The DELETE is checked against GET /pods/{id} afterwards and repeated
+        if the pod is still there. A pod that will not go stays in the pod
+        file, so the next start sweeps it again, and the log says so loudly.
+        """
         if not self.pod_id:
             return
+        pid = self.pod_id
+        tries = int(verify_tries if verify_tries is not None
+                    else os.environ.get("UPSCALER_TERMINATE_TRIES", "4"))
+        wait = float(verify_wait if verify_wait is not None
+                     else os.environ.get("UPSCALER_TERMINATE_WAIT", "5"))
+        gone = False
         try:
-            self._request("DELETE", f"/pods/{self.pod_id}")
-            self.log(f"pod {self.pod_id} terminated - you stop paying for it now")
-        except Exception as e:
-            # A failure here means the pod may still be running and billing.
-            # Say so loudly.
-            self.log(f"WARNING: could not terminate pod {self.pod_id}: {e}")
-            self.log(f"terminate it by hand: "
-                     f"curl -X DELETE -H 'Authorization: Bearer <key>' "
-                     f"{RUNPOD_API}/pods/{self.pod_id}")
+            for attempt in range(max(1, tries)):
+                try:
+                    self._request("DELETE", f"/pods/{pid}")
+                except Exception as e:
+                    if " 404" not in str(e):
+                        self.log(f"the DELETE for pod {pid} failed: {str(e)[:120]}")
+                if wait:
+                    time.sleep(wait)
+                if self._pod_gone(pid):
+                    gone = True
+                    break
+                self.log(f"pod {pid} is still there after the DELETE - "
+                         f"asking again ({attempt + 2}/{tries})")
         finally:
+            self.billing_until = time.time()
             self.pod_id = None
+        if gone:
+            forget_pod(pid)
+            self.log(f"pod {pid} terminated - you stop paying for it now")
+        else:
+            self.log(f"WARNING: pod {pid} may still be running and billing. "
+                     f"It stays in {POD_STATE}, so the next start sweeps it; "
+                     f"to end it now: curl -X DELETE -H 'Authorization: Bearer <key>' "
+                     f"{RUNPOD_API}/pods/{pid}")
+        return gone
+
+    def cost_so_far(self):
+        """What this rental has cost up to now, by this machine's clock.
+
+        The card bills from the moment it is created (the image pull is
+        billed) until it is let go; 30 seconds are added for the API calls
+        at either end, so the figure errs high.
+        """
+        if not self.billing_since:
+            return 0.0
+        end = self.billing_until or time.time()
+        price = float(self.cost_per_hour or self.price_per_hour() or 0)
+        return (end - self.billing_since + 30.0) / 3600.0 * price
 
     def sweep_orphans(self):
         """Terminate the pods this machine created and nobody is watching.
@@ -1072,11 +1166,17 @@ class RunPod:
         next run. Without it, the card is thrown away.
         """
         if self.keep_warm:
+            # A stopped card is not billed for its GPU and is not an orphan:
+            # it is kept on purpose, so it leaves the sweep's list.
+            pid = self.pod_id
             self.stop()
+            if pid:
+                forget_pod(pid)
         else:
+            # terminate() forgets the pod only once Runpod has really let it
+            # go. (It used to forget it after pod_id had already been set to
+            # None, so the file was never cleaned and the check was moot.)
             self.terminate()
-        if self.pod_id:
-            forget_pod(self.pod_id)
 
 
 class Local:
@@ -1097,6 +1197,9 @@ class Local:
         self.endpoint = None
         self.pod_id = None
         self.cost_per_hour = 0.0
+
+    def cost_so_far(self):
+        return 0.0
 
     def create(self):
         env = dict(os.environ)

@@ -76,6 +76,14 @@ DLORAL_SEC_PER_FRAME = 2.0
 RENTED_SPEEDUP = 12.0
 
 
+def _check_stop(should_stop):
+    """Raise if the job has been told to stop (Stop, or the budget)."""
+    if should_stop:
+        why = should_stop()
+        if why:
+            raise RuntimeError(why)
+
+
 def health(endpoint, timeout=15):
     """Ask a worker what it is."""
     url = endpoint.rstrip("/") + "/health"
@@ -140,8 +148,12 @@ def upscale(endpoint, video_path, out_path, scale=2, model=None, denoise=None,
     if not body or body[:12].find(b"ftyp") < 0:
         raise RuntimeError("the worker did not return a video: "
                            + body[:300].decode("utf-8", "replace"))
-    with open(out_path, "wb") as fh:
+    # Written beside and then moved into place, so a half-written answer
+    # can never be mistaken for a finished one by the resume.
+    tmp = out_path + ".part"
+    with open(tmp, "wb") as fh:
         fh.write(body)
+    os.replace(tmp, out_path)
     return out_path
 
 
@@ -260,7 +272,7 @@ def concat_parts(parts, out_path, log=print):
 
 def diffusion_run(endpoint, video_path, out_path, engine="seedvr2",
                   resolution=None, batch_size=None, scale=4, api_key=None,
-                  log=print, poll=20.0, timeout=43200):
+                  log=print, poll=20.0, timeout=43200, should_stop=None):
     """Send the video to the worker and wait for the diffusion job.
 
     The work does not fit in a request: the proxy gives a request about a
@@ -309,6 +321,7 @@ def diffusion_run(endpoint, video_path, out_path, engine="seedvr2",
     told = 0
     while time.time() - t0 < timeout:
         time.sleep(poll)
+        _check_stop(should_stop)
         try:
             req = urllib.request.Request(f"{endpoint.rstrip('/')}/diffusion/{jid}")
             req.add_header("User-Agent", USER_AGENT)
@@ -373,7 +386,7 @@ def diffusion_run(endpoint, video_path, out_path, engine="seedvr2",
 
 
 def dloral_run(endpoint, video_path, out_path, scale=4, api_key=None, log=print,
-               poll=20.0, timeout=36000):
+               poll=20.0, timeout=36000, should_stop=None):
     """Send the video to the worker and wait for the diffusion job.
 
     The work does not fit in a request: the proxy gives a request about a
@@ -415,6 +428,7 @@ def dloral_run(endpoint, video_path, out_path, scale=4, api_key=None, log=print,
     told = 0
     while time.time() - t0 < timeout:
         time.sleep(poll)
+        _check_stop(should_stop)
         try:
             req = urllib.request.Request(f"{endpoint.rstrip('/')}/dloral/{jid}")
             req.add_header("User-Agent", USER_AGENT)
@@ -483,7 +497,7 @@ def dloral_run(endpoint, video_path, out_path, scale=4, api_key=None, log=print,
 
 
 def star_run(endpoint, video_path, out_path, prompt="", upscale=4, chunk_len=24,
-             width=320, api_key=None, log=print, poll=5.0, timeout=7200):
+             width=320, api_key=None, log=print, poll=5.0, timeout=7200, should_stop=None):
     """Send the clip to the worker and wait for STAR to have it.
 
     STAR is a background job like the other diffusions: the model wants a
@@ -521,6 +535,7 @@ def star_run(endpoint, video_path, out_path, prompt="", upscale=4, chunk_len=24,
     told = 0
     while time.time() - t0 < timeout:
         time.sleep(poll)
+        _check_stop(should_stop)
         try:
             req = urllib.request.Request(f"{endpoint.rstrip('/')}/star/{jid}")
             req.add_header("User-Agent", USER_AGENT)
@@ -572,8 +587,19 @@ def face_chunked(endpoint, video_path, out_path, chunk_frames=CHUNK_FRAMES,
                             chunk_frames=chunk_frames, log=log, **kw)
 
 
+def _answer_is_done(path, frames):
+    """Is this piece's answer already here, whole?"""
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return False
+        got, _, w, h = probe_video(path)
+        return got == frames and w > 0 and h > 0
+    except Exception:
+        return False
+
+
 def upscale_chunked(endpoint, video_path, out_path, chunk_frames=CHUNK_FRAMES,
-                     log=print, **kw):
+                     log=print, should_stop=None, parts_dir=None, **kw):
     """Send a long video to the worker in pieces, and join the answers.
 
     One request has about a hundred seconds behind it (Cloudflare, in front
@@ -592,18 +618,34 @@ def upscale_chunked(endpoint, video_path, out_path, chunk_frames=CHUNK_FRAMES,
         log(f"{frames} frames fit in one request")
         return upscale(endpoint, video_path, out_path, log=log, **kw)
 
-    workdir = os.path.join(os.path.dirname(os.path.abspath(out_path)), "parts")
+    # The pieces live in parts_dir when the caller gives one: a folder named
+    # after what is being asked for, so a job that died - a dropped
+    # connection, a full disk, Stop - is picked up by the next job that
+    # asks for the same thing, instead of paying for every piece again.
+    workdir = parts_dir or os.path.join(os.path.dirname(os.path.abspath(out_path)), "parts")
+    os.makedirs(workdir, exist_ok=True)
     total = len(range(0, frames, chunk_frames))
     log(f"{frames} frames ({frames/fps:.0f}s) do not fit in one request - "
         f"sending {total} pieces of up to {chunk_frames} frames")
     answers = []
+    kept = 0
     for i, start in enumerate(range(0, frames, chunk_frames)):
         end = min(start + chunk_frames, frames)
-        part = split_video(video_path, workdir, start, end, fps)
         answer = os.path.join(workdir, f"answer-{start:07d}.mp4")
+        if _answer_is_done(answer, end - start):
+            answers.append(answer)
+            kept += 1
+            continue
+        if kept and len(answers) == kept:
+            log(f"{kept} piece(s) were already done by an earlier run - kept, "
+                f"not paid for again")
+        part = split_video(video_path, workdir, start, end, fps)
+        _check_stop(should_stop)
         log(f"piece {i+1}/{total}: frames {start}-{end} ({end-start} frames)")
         upscale(endpoint, part, answer, log=log, **kw)
         answers.append(answer)
+    if kept == total:
+        log(f"all {total} pieces were already done by an earlier run")
     log("joining the pieces back together…")
     concat_parts(answers, out_path, log=log)
     got, _, _, _ = probe_video(out_path)
@@ -687,9 +729,14 @@ def finish_locally(cloud_video, original, out_path, scale=2, look=None, encoder=
     cas = float(look.get("cas") or 0)
     halation = float(look.get("halation") or 0)
     perlin_grain = look.get("grain_mode") == "perlin" and grain > 0
+    if perlin_grain and not ffbin.has_filter("perlin"):
+        # perlin arrived in ffmpeg 7.1. Without it the generator failed
+        # silently and the pass died opening a grain file that was never
+        # made - at the very end, after the card had been paid for.
+        log("this ffmpeg has no perlin source (it needs 7.1 or later) - "
+            "the grain falls back to a static pattern")
+        perlin_grain = False
     grain_s = grain * 0.05
-    contrast = float(look.get("contrast", 0.0))
-    saturation = float(look.get("saturation", 0.0))
 
     info = json.loads(subprocess.run(
         ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams",
@@ -753,6 +800,10 @@ def finish_locally(cloud_video, original, out_path, scale=2, look=None, encoder=
              f"persistence=0.5:random_mode=seed:random_seed=1",
              "-t", f"{dur:.3f}", "-pix_fmt", "gray", "-f", "rawvideo", grain_file],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if not (os.path.exists(grain_file) and os.path.getsize(grain_file)):
+            log("the grain pattern could not be made - finishing without grain")
+            perlin_grain = False
+            grain = 0
         try:
             # The WHOLE file, not the first megabyte: the perlin field starts
             # bright and settles, so a short sample reads about 20 levels
@@ -783,13 +834,10 @@ def finish_locally(cloud_video, original, out_path, scale=2, look=None, encoder=
         filters.append(f"cas=strength={cas}")
     if grain and not perlin_grain:
         filters.append(f"noise=alls={grain}:allf=u")
-    if contrast or saturation:
-        filters.append(f"eq=contrast={1 + contrast}:saturation={1 + saturation}")
-    lift = float(look.get("black_lift") or 0)
-    if lift:
-        # Lift the black point a touch: the shadow detail of an analogue
-        # transfer never reaches zero.
-        filters.append(f"colorlevels=rimin={lift}:gimin={lift}:bimin={lift}")
+    # The grade: a luma curve and a chroma saturation, all in YUV. See
+    # engine.grade_filters for what it replaced and the measurement.
+    import engine as engine_mod
+    filters.extend(engine_mod.grade_filters(look))
     filters.append("format=yuv420p")
     shift = int(look.get("chroma_shift") or 0)
     if shift:

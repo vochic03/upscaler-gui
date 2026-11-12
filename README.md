@@ -6,8 +6,16 @@ here.
 
 ```bash
 cd ~/upscaler-gui
-python3 server.py --port 8790
+./start.sh          # the GUI and the local worker
 open http://127.0.0.1:8790/
+```
+
+`./start.sh stop` shuts both down and `./start.sh status` says what is
+running. To run the GUI by hand instead:
+
+```bash
+cd ~/upscaler-gui
+python3 server.py --port 8790
 ```
 
 Binds to `127.0.0.1` only. Nothing leaves the machine.

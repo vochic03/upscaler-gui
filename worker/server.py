@@ -297,6 +297,18 @@ def seedvr2_upscale(video_path, out_path, resolution=1080, log=print):
            "--resolution", str(resolution),
            "--batch_size", os.environ.get("SEEDVR2_BATCH", "33"),
            "--video_backend", "ffmpeg"]
+    # The same model, from the same place, as the /diffusion route. Without
+    # these the CLI looks for its weights under its own working directory
+    # (./models/SEEDVR2), not where the image keeps them
+    # (/app/seedvr2_models/SEEDVR2), fetches them from Hugging Face again,
+    # and takes whatever its own default model is - which is not
+    # necessarily the 3B FP8 that was measured and baked in.
+    models = os.environ.get("SEEDVR2_MODEL_DIR", "/app/seedvr2_models/SEEDVR2")
+    if os.path.isdir(models):
+        cmd += ["--model_dir", models]
+    cmd += ["--dit_model", os.environ.get("SEEDVR2_DIT",
+                                          "seedvr2_ema_3b_fp8_e4m3fn.safetensors"),
+            "--color_correction", "lab"]
     if os.environ.get("SEEDVR2_CHUNK"):
         cmd += ["--chunk_size", os.environ["SEEDVR2_CHUNK"],
                 "--temporal_overlap", "3"]

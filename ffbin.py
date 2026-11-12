@@ -45,3 +45,29 @@ def reset():
     """Look again - the next call after a Homebrew upgrade."""
     global _chosen
     _chosen = None
+
+
+_filters = {}
+
+
+def has_filter(name):
+    """Does the chosen ffmpeg have this filter?
+
+    Some of the finishing needs a recent ffmpeg: the `perlin` grain source
+    arrived in 7.1, and the ffmpeg that Ubuntu 24.04 and Debian ship is
+    6.1. Without this check the finishing pass died at the very end - after
+    the card had done the work and been paid for - opening a grain file
+    that the generator had silently failed to make.
+    """
+    binary = ffmpeg()
+    key = (binary, name)
+    if key not in _filters:
+        try:
+            out = subprocess.run([binary, "-hide_banner", "-filters"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 timeout=20).stdout.decode("utf-8", "replace")
+            _filters[key] = any(line.split()[1:2] == [name]
+                                for line in out.splitlines() if line.strip())
+        except Exception:
+            _filters[key] = False
+    return _filters[key]
