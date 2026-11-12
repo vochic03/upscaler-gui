@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>cbc probe</title></head>
+<body><pre id="out"></pre>
+<script type="module">
+const KEY = '000102030405060708090a0b0c0d0e0f';
+const h2b = (h) => Uint8Array.from(h.match(/../g).map((x) => parseInt(x, 16)));
+const b2h = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+
+const out = [];
+const say = (s) => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
+
+const raw = h2b(KEY);
+const iv = h2b('000102030405060708090a0b0c0d0e0f');
+const data = h2b('00112233445566778899aabbccddeeff');
+
+async function t(label, fn) {
+  try {
+    const r = await fn();
+    say(label.padEnd(46) + 'OK ' + (r ? b2h(new Uint8Array(r)) : ''));
+  } catch (e) {
+    say(label.padEnd(46) + 'ERR name=' + e.name + ' msg=' + JSON.stringify(e.message));
+  }
+}
+
+say('isSecureContext=' + window.isSecureContext + ' subtle=' + !!(window.crypto && crypto.subtle));
+
+await t('import AES-CBC', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['encrypt', 'decrypt']);
+  return 'imported';
+});
+await t('import AES-CBC length=128', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC', length: 128 }, false, ['encrypt', 'decrypt']);
+  return 'imported';
+});
+await t('encrypt AES-CBC', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['encrypt']);
+  return crypto.subtle.encrypt({ name: 'AES-CBC', iv: iv.buffer }, k, data.buffer);
+});
+await t('decrypt AES-CBC (no length)', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['decrypt']);
+  return crypto.subtle.decrypt({ name: 'AES-CBC', iv: iv.buffer }, k, data.buffer);
+});
+await t('decrypt AES-CBC (length 128)', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['decrypt']);
+  return crypto.subtle.decrypt({ name: 'AES-CBC', iv: iv.buffer, length: 128 }, k, data.buffer);
+});
+await t('decrypt AES-CBC (iv as Uint8Array view)', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['decrypt']);
+  return crypto.subtle.decrypt({ name: 'AES-CBC', iv }, k, data.buffer);
+});
+await t('decrypt AES-CTR (control)', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-CTR' }, false, ['decrypt']);
+  return crypto.subtle.decrypt({ name: 'AES-CTR', counter: iv.buffer, length: 64 }, k, data.buffer);
+});
+await t('decrypt AES-GCM (control)', async () => {
+  const k = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['decrypt']);
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv.buffer }, k, data.buffer);
+});
+
+document.title = 'DONE';
+</script>
+</body></html>

@@ -1,0 +1,31 @@
+# A thin layer on top of an image that is already built.
+#
+# The full build of this image takes about forty minutes: it installs torch,
+# the face stack, three separate venvs and - if asked - eleven gigabytes of
+# weights. When only the worker code changed, none of that has to happen
+# again: the files are copied over the finished image and the result is the
+# same image with the same layers underneath.
+#
+#   docker build -f Dockerfile.patch -t bzz1/upscaler:both .
+#
+# It also rescues a build that cannot start. The base image
+# (nvidia/cuda:12.1.1-runtime-ubuntu22.04) can lose its manifest in a
+# containerd store that was pruned under disk pressure - the tag is still
+# there, the content the builder needs is not, and the build stops at
+# "Step 1/58 : FROM ..." with "NotFound: content digest". This file does not
+# need the base image at all: it starts from the image that was built from
+# it.
+#
+# Only the files that changed are copied here. Everything else - the
+# venvs, the models, the engines.json, the entrypoint's settings - comes
+# from the image underneath.
+FROM bzz1/upscaler:both
+
+# All of them in ONE layer. The legacy builder copies the whole filesystem
+# - thirty-two gigabytes - for every single step, so five COPYs is five
+# copies of the image and half an hour. One COPY is one copy.
+COPY server.py dloral_job.py star_job.py diffusion_job.py entrypoint.sh /app/
+
+RUN chmod +x /app/entrypoint.sh && \
+    echo "patched: the weight links are made on the volume disk, and the" \
+         "worker says where the weights live"

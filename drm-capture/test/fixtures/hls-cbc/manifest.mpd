@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--Generated with https://github.com/shaka-project/shaka-packager version v3.9.3-0a8ba4f-release-->
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="urn:mpeg:dash:schema:mpd:2011 DASH-MPD.xsd" xmlns:cenc="urn:mpeg:cenc:2013" profiles="urn:mpeg:dash:profile:isoff-live:2011" minBufferTime="PT2S" type="static" mediaPresentationDuration="PT8S">
+  <Period id="0">
+    <AdaptationSet id="1" contentType="video" width="320" height="240" frameRate="12800/512" segmentAlignment="true" par="4:3">
+      <ContentProtection value="cbcs" schemeIdUri="urn:mpeg:dash:mp4protection:2011" cenc:default_KID="10111213-1415-1617-1819-1a1b1c1d1e1f"/>
+      <ContentProtection schemeIdUri="urn:uuid:1077efec-c0b2-4d02-ace3-3c1e52e2fb4b">
+        <cenc:pssh>AAAARHBzc2gBAAAAEHfv7MCyTQKs4zweUuL7SwAAAAIQERITFBUWFxgZGhscHR4fEBESExQVFhcYGRobHB0eHwAAAAA=</cenc:pssh>
+      </ContentProtection>
+      <Representation id="0" bandwidth="840112" codecs="avc1.42c00d" mimeType="video/mp4" sar="1:1">
+        <SegmentTemplate timescale="12800" initialization="v-init.mp4" media="v-seg-$Number$.m4s" startNumber="1">
+          <SegmentTimeline>
+            <S t="0" d="12800" r="7"/>
+          </SegmentTimeline>
+        </SegmentTemplate>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet id="0" contentType="audio" startWithSAP="1" segmentAlignment="true">
+      <ContentProtection value="cbcs" schemeIdUri="urn:mpeg:dash:mp4protection:2011" cenc:default_KID="10111213-1415-1617-1819-1a1b1c1d1e1f"/>
+      <ContentProtection schemeIdUri="urn:uuid:1077efec-c0b2-4d02-ace3-3c1e52e2fb4b">
+        <cenc:pssh>AAAARHBzc2gBAAAAEHfv7MCyTQKs4zweUuL7SwAAAAIQERITFBUWFxgZGhscHR4fEBESExQVFhcYGRobHB0eHwAAAAA=</cenc:pssh>
+      </ContentProtection>
+      <Representation id="1" bandwidth="70590" codecs="mp4a.40.2" mimeType="audio/mp4" audioSamplingRate="44100">
+        <AudioChannelConfiguration schemeIdUri="urn:mpeg:dash:23003:3:audio_channel_configuration:2011" value="1"/>
+        <SegmentTemplate timescale="44100" initialization="a-init.mp4" media="a-seg-$Number$.m4s" startNumber="1">
+          <SegmentTimeline>
+            <S t="0" d="45056"/>
+            <S t="45056" d="44032" r="5"/>
+            <S t="309248" d="43552"/>
+          </SegmentTimeline>
+        </SegmentTemplate>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>

@@ -225,6 +225,113 @@ The destroy is in a `finally`, so **the card is given back even if the job
 fails or you press Stop**. That is the whole reason it is a module rather
 than three lines in the job: an orphaned pod keeps billing you by the hour.
 
+### The weights, and why a run used to spend twenty minutes downloading them
+
+The diffusion engines need their weights on the card: 11 GB for DLoRAL,
+3.4 GB for SeedVR2, 7.6 GB for STAR. Hugging Face serves them at 5–9 MB/s,
+so a run that fetched them spent **twenty minutes and $0.38** downloading
+before it started working — and did it again on every run, because a
+terminated pod takes its disk with it.
+
+There are three ways to stop that, and the tool has all three:
+
+| | what it does | what it costs |
+|---|---|---|
+| **Keep the card between jobs** | the card is *stopped* at the end of a job instead of terminated: the GPU is released, and the disk — with the weights on it — is kept. The next run of the same engine wakes it up and starts working at once. | free: a stopped pod with no volume disk of its own costs nothing |
+| **The network volume** | the weights live on a volume that belongs to no pod: every pod that mounts it finds them already there. Survives termination, shared between pods. **Off by default** — see below. | $0.07/GB/month — $2.80 for the forty gigabytes the three engines need |
+| **Baking them into the image** | they come with the image, from Runpod's own CDN. | a bigger image: a bigger pull on every run, and a big push once |
+
+The **network volume** is **off by default** now, and that is a
+money decision rather than a technical one:
+
+| | |
+|---|---|
+| the volume | $2.80 a month, every month, used or not |
+| what it saves | one weight fetch per run |
+| the fetch | 11.8 GB at 72 MB/s = 2 min 43 s = **$0.05** |
+| the break-even | about **30 runs a month** |
+
+The fetch is not a fixed number: the same eleven gigabytes were measured
+at 5–9 MB/s on another run, which would make it $0.79 instead of $0.05.
+So the volume buys certainty, and it is worth it if you run the same
+engine thirty times a month or more. Below that it is $33.60 a year for
+something a card that is kept warm between jobs gives away.
+
+Turning it on is one command and one line of code:
+
+```
+python3 tools/volume.py create --dc US-TX-3 --size 40
+# and put the id it prints into RUNPOD_VOLUME_ID
+```
+
+Two things about it are worth knowing:
+
+* **the card has to be in the volume's data centre.** A pod can only
+  mount a volume from its own centre, so the volume narrows the choice of
+  card to that centre — and the centre has to have the card in the
+  *secure* cloud, because that is the only kind a network volume can be
+  mounted from. If there is no card of the kind you want there, the job
+  falls back to a card without the volume and the weights are fetched
+  onto the card's own disk instead: slower, but it works, and the job
+  does not fail.
+* **the volume does not move with the job.** A pod's own volume disk is
+  billed at $0.20 a GB a month while the pod is parked, which is why the
+  code mounts the *network* volume instead: a parked pod then costs
+  nothing beyond the volume itself.
+
+The volume's data centre is the thing to keep an eye on, because it is
+the thing that can quietly waste the money. It was created in US-NC-1,
+which had no GPU of any kind — the volume could never have been used, and
+it cost $2.80 a month for nothing. It now lives in **US-TX-3**
+(`gb5ouapvqq`), which is one of the twenty-four centres that take a
+network volume *and* had an L40S in it.
+
+`tools/volume.py` looks after it:
+
+```
+python3 tools/volume.py list     # the volumes on the account
+python3 tools/volume.py probe    # which centres have cards - costs nothing
+python3 tools/volume.py create --dc US-TX-3 --size 40
+python3 tools/volume.py delete --id gb5ouapvqq
+```
+
+`probe` is free because a pod that cannot be created is not billed, and
+Runpod answers "no instances available" *before* it looks at the balance:
+the difference between that answer and "your balance is too low" is
+exactly which centres have cards in them.
+
+**The estimate says what the first run really costs.** A diffusion engine
+needs its weights, and a card that does not have them fetches them from
+Hugging Face — eleven gigabytes for DLoRAL, seven and a half for STAR.
+That time is billed like any other, so the estimate quotes it as a line of
+its own: the clip, the cold start, and the total for the first run. An
+estimate that leaves the fetch out quotes $0.06 for a job that costs
+$0.14, and the difference arrives as a surprise on the bill.
+
+How long the fetch takes is not a constant: a card measured 72 MB/s
+(11.8 GB in 2 min 43 s) on one run and 5–9 MB/s on another, probably
+because the CDN had the file cached near that card or did not. The
+estimate uses 40 MB/s, which is the fast one discounted by half.
+
+The SeedVR2 image carries its own weights, so it has no such line: they
+come down with the image, from Runpod's CDN.
+
+**Keep the card between jobs** is a checkbox in the GUI, next to the API
+key. It is worth it when you are running several jobs in a row: the second
+one skips the image pull, and with the weights on the card it skips the
+download too. It can also backfire — the machine a parked card sits on
+may have given its GPU to somebody else in the meantime, and then the card
+cannot be woken up. The job says so and rents a new one.
+
+When you are done, the **Throw away the parked cards** button clears them.
+
+The **baking** is per engine, at build time:
+
+```bash
+docker build --build-arg BUILD_SEEDVR2=1 --build-arg BUILD_SEEDVR2_WEIGHTS=1 \
+  -t <you>/drm-upscaler:seedvr2 .
+```
+
 ### What you need
 
 1. A Runpod account and an API key
@@ -240,6 +347,51 @@ docker push <you>/drm-upscaler:latest
 (For the diffusion engine, build it with
 `--build-arg BUILD_DLORAL=1` and push that image too.)
 
+#### Rebuilding the worker without rebuilding the world
+
+The full build of the worker image takes about forty minutes: it
+installs torch, the face stack and three separate venvs. When only the
+worker's own code changed, none of that has to happen again:
+
+```bash
+cd ~/upscaler-gui/worker
+docker build -f Dockerfile.patch -t <you>/drm-upscaler:both .
+```
+
+`Dockerfile.patch` lays the changed files over the image that is
+already built. It takes **forty-five seconds**, and it is one layer
+rather than five — the legacy builder copies the whole filesystem for
+every single step, so five COPYs is five copies of a thirty-two
+gigabyte image.
+
+It is also the way out of a broken store. The base image
+(`nvidia/cuda:12.1.1-runtime-ubuntu22.04`) is a multi-architecture
+image, and the builder looks the platform manifest up by digest. If the
+store has the tag but not the manifest — which is what happens when the
+content store was pruned under disk pressure — the build stops at
+
+```
+Step 1/58 : FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+NotFound: content digest sha256:83079b...: not found
+```
+
+and a plain `docker pull` does not fix it, because the pull fetches the
+index and the builder wants the manifest. The repair is to pull the
+manifest by its digest:
+
+```bash
+# the amd64 one - this Mac is an arm64, and the worker runs on the card
+docker pull --platform linux/amd64 \
+  nvidia/cuda@sha256:2541299cf78eee8ee2b415782ad6f083bc4d351c4e40f104c776159bd483650e
+docker tag nvidia/cuda@sha256:2541299cf78eee8ee2b415782ad6f083bc4d351c4e40f104c776159bd483650e \
+  nvidia/cuda:12.1.1-runtime-ubuntu22.04
+```
+
+The wrong manifest is the other way of breaking it: the arm64 one has
+no torch beyond 2.0.1 on the cu121 index, so the build fails at
+`pip install torch==2.5.1`. The tag has to point at the **amd64**
+manifest, because that is the image that runs on the card.
+
 Then in the GUI, under **Advanced → Cloud GPU**: tick **Rent a GPU for this
 job**, paste the key, and put your image name in **Container image**. The
 GPU list is filled in for the engine you picked, with the hourly price.
@@ -247,14 +399,157 @@ GPU list is filled in for the engine you picked, with the hourly price.
 **Check the key** tells you whether the API accepts it before you start a
 job.
 
+### Letting an agent drive it
+
+The GUI is a local program with a JSON API, and
+[API Anything](https://github.com/goodnight000/api-anything) is a way to
+give that API to agents: it turns a website into operations an agent can
+call, over plain HTTP, and it runs as an MCP server that Claude Code,
+Codex, Cursor, Gemini CLI and VS Code all understand.
+
+One command connects them:
+
+```bash
+python3 tools/api_anything.py install
+```
+
+It installs the operations into API Anything's own store
+(`~/.api-anything/sites/upscaler-gui.json`) and connects the agents it
+finds. Sharing stays **off**: these operations point at 127.0.0.1, so
+there is nothing to share with anybody, and nothing of yours leaves the
+machine.
+
+What the agents get:
+
+| operation | what it does |
+|---|---|
+| `presets` | the engines, the looks, the backends and the cards with their live prices |
+| `estimate` | what a cloud upscale would cost, before anything is rented |
+| `run_local` | upscale a video on this Mac's own GPU - free, no approval |
+| `run_cloud` | upscale a video on a rented GPU - needs the approval |
+| `job` | how a job is going: its state, its log, its output |
+| `cards` | the cards an engine can run on, with their prices and memory |
+| `approvals` | the cloud jobs waiting for the user to agree to a price |
+
+An agent finds them the way it finds anything else:
+
+```bash
+npx -y api-anything search "upscale video"
+npx -y api-anything call upscaler-gui presets
+python3 tools/api_anything.py call estimate path=~/Movies/film.mov engine=dloral
+```
+
+**The money still belongs to the user.** An agent can ask what a job
+costs, and it gets an *approval id* with the answer - but the id is
+pending until the user says yes. The GUI shows the pending approvals
+under **Advanced → Cloud GPU**, with the price and an Approve button, and
+only then can the job run. An agent cannot approve its own spending: the
+server refuses a rental that carries no approved id, and the approval is
+bound to the clip, the engine and the card it was priced for.
+
+### A spending cap, for when the agent is allowed to spend
+
+The gate above is the default, and it stays the default: a job that rents
+needs the user's approval of the price, every time.
+
+Sometimes that is the wrong shape - an unattended run, or a session where
+the user has already said "go" and does not want to be interrupted. Then the
+server can be started with a ceiling instead:
+
+```bash
+UPSCALER_SPEND_CAP_USD=25 python3 server.py --port 8790
+```
+
+With a cap set, the server approves rentals itself, up to that ceiling, and
+refuses the job that would take the session past it. The spend is written to
+a ledger *before* the job starts, so it survives a restart of the server:
+
+```bash
+curl http://127.0.0.1:8790/api/spend
+```
+
+    {"cap": 25.0, "total": 0.53, "remaining": 24.47, "jobs": [...]}
+
+The cap is the control, so it has to be a number the user chose, and the
+ceiling is not the agent's to raise. With no cap set, nothing about the gate
+changes: an agent still cannot approve its own spending.
+
+The API describes itself as well, in a machine-readable document:
+
+```
+http://127.0.0.1:8790/api/openapi.json
+```
+
+### Thinking ahead: two dashboards in the loop
+
+**[CodeMouse](https://codemouse.ai)** reviews every pull request with
+Claude and GPT at once, and skips what a human or another bot has already
+said. That is a second opinion on the diff *before* it reaches you: point
+it at the repository and every change that goes up comes back with two
+models' findings, which get fixed before you read them.
+
+The project is a git repository now, with the scratch space and the
+vendored binaries left out, so a pull request is a reviewable thing.
+
+**[OpenRouter's observability](https://openrouter.ai/workspaces/default/observability)**
+is the same feed `tools/insights.py` reads: every request, its model, its
+tokens, its cost and how long it took. As a dashboard it is a bill. Read
+as a loop it is feedback - which of the habits are expensive, which model
+is worth its price, and whether the last change was worth what it cost.
+
+```bash
+python3 tools/insights.py --days 7
+```
+
+The key goes in the Keychain, never in a chat:
+
+```bash
+security add-generic-password -a "$USER" -s openrouter -w
+```
+
+**The same loop belongs to this program.** The rentals are the bigger
+bill: an estimate is a promise, and a promise that is never checked is a
+guess. Every job should record what the card really cost against what
+the estimate said, and the differences should feed back into the cost
+model - which is exactly how the DLoRAL rate (measured at 14.5 s a frame
+against a model that said 5.1) and the SeedVR2 memory rule (24 GB that
+turned out to be 48) were found.
+
 ### What it costs, and for how long
+
+**The diffusion engines cost what the result costs.** DLoRAL was measured
+at 10.45 s a frame for a 1080p result and 1.14 s for a 480p one (on an
+L40S, 2026-11-02): the diffusion runs on the canvas - the target over
+four - and the attention over it grows faster than the pixels do. So the
+72-second film at 1080p is **10.8 hours and $11.83** on one card, the
+same film at 720p is **3.5 hours and $3.15**, and SeedVR2 at 1080p - a
+different model, a different look - is **1.7 hours and $1.56**.
+
+The estimate quotes the number before the money moves, and says "over
+four hours" when it is.
 
 | GPU | $/hour | Enough for |
 |---|---|---|
-| RTX 4090 / A5000, 24 GB | ~$0.44 | Real-ESRGAN |
-| L40S, 48 GB | ~$0.99 | Real-ESRGAN, DLoRAL |
+| RTX 4090 / A5000, 24 GB | ~$0.44 | Real-ESRGAN, SeedVR2, and **DLoRAL up to 720p** |
+| L40S, 48 GB | ~$0.99 | Real-ESRGAN, DLoRAL, STAR |
 | A100, 80 GB | ~$1.19 | DLoRAL, comfortably |
 | H100, 80 GB | ~$2.90 | DLoRAL, fast |
+
+**The card has to be able to hold the picture.** DLoRAL's VAE decoder
+runs its attention at the size of the *result*, not the size of the
+source, so the memory it wants follows the picture it is making: at 1080p
+the attention alone is 16 GB and the whole pass does not fit on a 24 GB
+card at all. A 720p result is a quarter of the pixels and does fit.
+
+So the card list follows the size of the result: a DLoRAL job capped at
+**1280x720** is offered the 24 GB cards, and it costs **$2.62** instead
+of $5.65 for the 1080p one — it is the same diffusion at a quarter of
+the pixels. Uncapped, it needs an L40S or bigger. STAR needs 48 GB
+whatever the size: it is a 1.7B transformer and wanted about 39 GB for
+its own small example.
+
+The estimate says how much memory the card needs, so the number is on
+the screen before the money is spent.
 
 The pod runs for exactly as long as the job: a 7-minute clip is about 7
 minutes of card, a few cents. The log says when the pod is up and when it
@@ -293,7 +588,8 @@ The chain this GUI builds:
                                                                   encode - all on the Mac
 ```
 
-**DLoRAL is the interesting one.** It is diffusion-based like STAR, but it
+**DLoRAL is the interesting one, and it is also the one that
+shoots itself in the foot.** It is diffusion-based like STAR, but it
 does it in *one* step instead of many, and it is built for temporal
 consistency rather than for text-to-video. So it sits between the two: it
 invents detail like STAR does, but it is far cheaper and it does not shimmer
@@ -355,6 +651,27 @@ docker build --build-arg BUILD_DLORAL=1 -t drm-upscaler-dloral .
 and put the weights in `/app/DLoRAL/preset/models/`
 (`ram_swin_large_14m.pth`, `DAPE.pth`, `checkpoints/model.pkl`).
 
+### The images that are on Docker Hub
+
+| image | what it can do |
+|---|---|
+| `bzz1/upscaler:latest` | Real-ESRGAN and the face pass |
+| `bzz1/upscaler:seedvr2` | the same, plus **SeedVR2** (the 3B diffusion) |
+| `bzz1/upscaler:both` | the same, plus **SeedVR2 and DLoRAL** |
+
+The diffusion engines are opt-in layers, so each one costs an image of its
+own. The weights are **not** baked in - they are fetched on the card the
+first time they are needed (3.4 GB for SeedVR2, 11 GB for DLoRAL), which
+keeps the images small enough to pull quickly.
+
+Point the **GPU worker image** field at one of these and the presets that
+need an engine the image does not have are marked as such, with the reason,
+before anything is rented.
+
+**DLoRAL needs a card with 48 GB of VRAM or more** (an L40S or an A100) at
+1080p: the VAE decoder's attention at that size wants 16 GB on its own.
+A 24 GB card runs out of memory. SeedVR2 is happy on 24 GB.
+
 ---
 
 ## The presets
@@ -363,6 +680,7 @@ The GUI asks one question — **what do you want?** — and fills in the rest:
 
 | Preset | What it does |
 |---|---|
+| **Enhance** | **The default.** SeedVR2 on a rented GPU: a video diffusion model that runs on the full 1080p and invents the detail the capture lost, frame by frame. De-noised first, sharpened with CAS, a little grain and glow for depth. 1.7 hours and $1.91 for a 72-second 1080p film. |
 | **Faithful** | Real-ESRGAN here, 2x, nothing else. Sharp and honest. |
 | **Polished** | Real-ESRGAN here, bilateral de-noise, then the blend, soften and grain. The DVD look. |
 | **Polished on a rented GPU** | the same, with the AI pass on a card, so your Mac stays cool. Cents. |
@@ -518,6 +836,12 @@ where the recipe is:
 4. add a little **noise** afterwards, to hide the washed-out patches that
    MPEG compression leaves behind.
 
+The **Enhance** look is the exception: it is for a capture you want
+*sharper*, not softer. The soft look below is made by taking detail
+**away**, and on a DVD capture that only makes it softer still - so the
+Enhance look de-noises first (the compression goes before the diffusion,
+not after it) and never softens at all.
+
 The important part is that the soft look is made by taking detail **away**:
 a general model upscaled frame by frame gives every frame its own invented
 detail, and the picture shimmers. Mixing in a plain, non-invented layer and
@@ -525,6 +849,7 @@ detail, and the picture shimmers. Mixing in a plain, non-invented layer and
 
 | Look | What it does |
 |---|---|
+| **Enhance** | the opposite of the DVD look: de-noise first, keep the AI result (only a fifth of a plain enlargement mixed in, for stable edges), sharpen with CAS, add a little grain and glow. **This is the one for "more detail and more depth".** |
 | **Clean** | the AI result on its own. Sharp and detailed, but it invents texture that was never in the picture. |
 | **Polished** | denoise first, blend the AI result 65/35 with a plain lanczos enlargement, soften it, add static grain, lift the contrast a little. **This is the DVD-like look.** |
 | **Matte** | the same, pushed further: more denoise, more of the plain enlargement, softer still, more grain. Almost no sharpening. |
@@ -538,6 +863,16 @@ Two details that matter:
 * **The grain is static**, the same pattern in every frame. Premiere's Add
   Noise is random per frame, which on moving footage at 50 fps crawls and
   shimmers — the opposite of the calm film look.
+
+Selur's own forum is the other half of this recipe, and it was scraped
+without a login: `HYBRID-CHAINS.md` has the processing order he publishes,
+a complete Hybrid-generated script for an interlaced DVD upscale, the QTGMC
+parameters as he actually sets them, and the plugin set a current QTGMC
+should bind. Two things out of it land directly on this pipeline: Hybrid
+upscales with **Real-ESRGAN Compact (Anime)** — the same family as our
+weights — and his hand-tuned scripts keep the source grain
+(`GrainRestore=0.7`, `EZKeepGrain=1.50`) instead of inventing new grain,
+which is what the Polished look already does.
 
 ---
 
@@ -726,10 +1061,28 @@ In the simplest terms:
 |---|---|---|
 | What it does | enlarges what is there | invents what could be there |
 | Needs a prompt | no | **yes** |
-| Runs on | this Mac, on the GPU | a free NVIDIA GPU in the cloud |
-| Needs an internet connection | no | **yes, and it uploads your clip** |
+| Runs on | this Mac, on the GPU | a rented NVIDIA GPU, or a free one in the cloud |
+| Needs an internet connection | no | **yes** (the cloud route uploads your clip) |
 | Flicker | none | low (that is what the model is for) |
 | Good for | clean footage, long videos | short, damaged, low quality footage |
+
+### STAR has two routes, and they are not the same thing
+
+| | the **STAR preset** | the **STAR** entry in the dropdown |
+|---|---|---|
+| Where it runs | a **rented card** (L40S or A100, 48 GB+) | the **Hugging Face Space** |
+| Your clip | goes to the card, and nowhere else | **is uploaded to huggingface.co** |
+| Costs money | yes — about $0.30 for a two-second clip | no, but the free GPU quota is two minutes a day |
+| How long it takes | a few minutes | a queue, if the Space is awake |
+
+The preset is the one to use: the footage stays on the rented box and the
+box is destroyed when the job ends. The Space route is the fallback for
+footage you are allowed to upload somewhere else.
+
+The important thing to know about STAR either way: **it is not a tool for a
+film.** It regenerates a *short clip* — its own example is 320 pixels wide
+and two seconds long — and the model wants about 39 GB of VRAM to do it.
+That is why the card list for it starts at 48 GB.
 
 ### Why STAR cannot run on your Mac
 
@@ -738,10 +1091,10 @@ no Apple Silicon build at all) and a GPU with **24 GB of VRAM** — the authors
 recommend more, and report ~39 GB for their own small example. Your M1 Pro
 has no CUDA and a 16 GB unified memory. There is no port.
 
-So the GUI runs STAR through the **official Hugging Face Space**
-([SherryX/STAR](https://huggingface.co/spaces/SherryX/STAR)), which is a
-free ZeroGPU A10G. The client tries the official Space and then two mirrors
-in turn, because a free GPU instance can be cold, broken or out of quota.
+So the GUI runs STAR through a **rented card** (the preset) or through the
+**official Hugging Face Space** (the dropdown). The Space is a free ZeroGPU
+A10G; the client tries the official Space and then two mirrors in turn,
+because a free GPU instance can be cold, broken or out of quota.
 
 ### …and the free cloud demo does not work either
 
@@ -879,6 +1232,47 @@ a model out.**
   a few hundred megabytes.
 * The upstream script wants 3x the video size free. This one needs much
   less.
+
+### When the disk runs out: the scratch space goes onto your iCloud Drive
+
+The scratch space is `~/upscaler-gui/work` — the uploads, the job folders
+and the finished videos. A big film puts a couple of gigabytes in there,
+and when the disk fills, a job dies halfway through with "no space left on
+device".
+
+So there is a guard. Before a job starts it looks at the free space on the
+volume, and if there is less than **10 GB** left it moves the scratch space
+into your iCloud Drive:
+
+```bash
+python3 tools/space_guard.py            # what is going on
+python3 tools/space_guard.py relocate   # do it now
+python3 tools/space_guard.py restore    # put it back
+```
+
+It leaves a symlink behind, so every path in the project keeps working
+unchanged — the GUI, the uploads, the finished videos, all of it.
+
+What it is and what it is not, because this is easy to get wrong:
+
+* **It is a pressure valve, not a spare disk.** The iCloud container is on
+  the same volume, so a file there takes local space until macOS reclaims
+  it. With "Optimize Mac Storage" on (it is, on this Mac), macOS evicts
+  iCloud Drive files when the disk gets tight and leaves a placeholder
+  behind. Reading one afterwards downloads it again.
+* **There is no way to evict on demand.** `brctl evict` refuses — "The
+  file cannot be evicted" — and `fileproviderctl` has no evict verb at
+  all. So the guard does not try: it puts the scratch where macOS can
+  reach it, and lets macOS do the reclaiming when the disk fills up.
+* **It costs a little of your iCloud.** The scratch is uploaded to your
+  iCloud, so it takes bandwidth and a little of your quota. It is scratch
+  space, so it is thrown away afterwards — but the upload is real.
+* **A file that is open while macOS evicts it keeps working** — the open
+  descriptor holds the data. A file that is read again afterwards is
+  downloaded again, which is slow but works.
+
+The proof that the reclaiming works is in your own iCloud Drive: files over
+900 MB that read as 0 B locally, because they are placeholders.
 
 ---
 
